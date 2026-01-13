@@ -1,0 +1,1527 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>UTR Year in Review</title>
+        <link
+            href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@300;400;500;600;700;800&display=swap"
+            rel="stylesheet"
+        />
+        <style>
+            :root {
+                --tennis-green: #1a472a;
+                --court-clay: #c2572e;
+                --ball-yellow: #ccff00;
+                --hard-court: #0066b2;
+                --gold: #ffd700;
+                --dark-bg: #0a0a0f;
+                --card-bg: #12121a;
+                --card-hover: #1a1a25;
+                --text-primary: #ffffff;
+                --text-secondary: #6b7280;
+                --win: #22c55e;
+                --loss: #ef4444;
+                --accent: #8b5cf6;
+            }
+
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+
+            body {
+                font-family: "Outfit", sans-serif;
+                background: var(--dark-bg);
+                color: var(--text-primary);
+                min-height: 100vh;
+                background-image:
+                    radial-gradient(
+                        ellipse at 0% 0%,
+                        rgba(139, 92, 246, 0.15) 0%,
+                        transparent 50%
+                    ),
+                    radial-gradient(
+                        ellipse at 100% 100%,
+                        rgba(204, 255, 0, 0.08) 0%,
+                        transparent 50%
+                    );
+            }
+
+            .container {
+                max-width: 1100px;
+                margin: 0 auto;
+                padding: 2rem;
+            }
+
+            header {
+                text-align: center;
+                padding: 3rem 0 1rem;
+            }
+
+            .year-badge {
+                font-family: "Bebas Neue", sans-serif;
+                font-size: 8rem;
+                line-height: 1;
+                background: linear-gradient(
+                    135deg,
+                    var(--ball-yellow) 0%,
+                    var(--gold) 50%,
+                    var(--accent) 100%
+                );
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+                background-clip: text;
+                text-shadow: 0 0 80px rgba(204, 255, 0, 0.3);
+            }
+
+            .subtitle {
+                font-size: 0.9rem;
+                font-weight: 600;
+                color: var(--text-secondary);
+                letter-spacing: 0.4em;
+                text-transform: uppercase;
+                margin-top: -0.5rem;
+            }
+
+            .player-section {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 1.5rem;
+                margin: 2rem 0;
+                padding: 1.5rem 2rem;
+                background: linear-gradient(
+                    135deg,
+                    var(--card-bg) 0%,
+                    rgba(139, 92, 246, 0.1) 100%
+                );
+                border-radius: 16px;
+                border: 1px solid rgba(139, 92, 246, 0.2);
+            }
+
+            .player-name {
+                font-family: "Bebas Neue", sans-serif;
+                font-size: 2.5rem;
+            }
+
+            .current-utr {
+                background: linear-gradient(
+                    135deg,
+                    var(--ball-yellow),
+                    var(--gold)
+                );
+                color: #000;
+                padding: 0.5rem 1.25rem;
+                border-radius: 30px;
+                font-weight: 700;
+                font-size: 1.25rem;
+            }
+
+            /* Tabs */
+            .tab-container {
+                display: flex;
+                justify-content: center;
+                gap: 0.5rem;
+                margin: 2rem 0;
+                flex-wrap: wrap;
+            }
+
+            .tab-btn {
+                background: var(--card-bg);
+                border: 2px solid rgba(255, 255, 255, 0.1);
+                color: var(--text-secondary);
+                padding: 0.75rem 1.5rem;
+                border-radius: 30px;
+                cursor: pointer;
+                font-family: "Outfit", sans-serif;
+                font-weight: 600;
+                font-size: 0.9rem;
+                transition: all 0.3s;
+            }
+
+            .tab-btn:hover {
+                background: var(--card-hover);
+                border-color: rgba(255, 255, 255, 0.2);
+            }
+            .tab-btn.active {
+                background: linear-gradient(135deg, var(--accent), #a78bfa);
+                border-color: var(--accent);
+                color: white;
+                box-shadow: 0 0 25px rgba(139, 92, 246, 0.4);
+            }
+
+            /* Hero Stats */
+            .hero-record {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 2rem;
+                padding: 3rem;
+                background: var(--card-bg);
+                border-radius: 24px;
+                margin: 1.5rem 0;
+                border: 1px solid rgba(255, 255, 255, 0.05);
+                position: relative;
+                overflow: hidden;
+            }
+
+            .hero-record::before {
+                content: "";
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                height: 3px;
+                background: linear-gradient(
+                    90deg,
+                    var(--win),
+                    var(--ball-yellow),
+                    var(--loss)
+                );
+            }
+
+            .hero-stat {
+                text-align: center;
+            }
+            .hero-number {
+                font-family: "Bebas Neue", sans-serif;
+                font-size: 5rem;
+                line-height: 1;
+            }
+            .hero-label {
+                font-size: 0.8rem;
+                font-weight: 600;
+                color: var(--text-secondary);
+                text-transform: uppercase;
+                letter-spacing: 0.15em;
+                margin-top: 0.5rem;
+            }
+            .hero-divider {
+                width: 2px;
+                height: 80px;
+                background: linear-gradient(
+                    180deg,
+                    transparent,
+                    rgba(255, 255, 255, 0.2),
+                    transparent
+                );
+            }
+
+            /* Callout Cards */
+            .callouts-grid {
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 1rem;
+                margin: 1.5rem 0;
+            }
+
+            .callout-card {
+                background: var(--card-bg);
+                border-radius: 16px;
+                padding: 1.5rem;
+                border: 1px solid rgba(255, 255, 255, 0.05);
+                position: relative;
+                overflow: hidden;
+                transition:
+                    transform 0.3s,
+                    border-color 0.3s;
+            }
+
+            .callout-card:hover {
+                transform: translateY(-4px);
+                border-color: rgba(255, 255, 255, 0.1);
+            }
+
+            .callout-card.nemesis {
+                border-left: 3px solid var(--loss);
+            }
+            .callout-card.dominated {
+                border-left: 3px solid var(--win);
+            }
+            .callout-card.rival {
+                border-left: 3px solid var(--accent);
+            }
+
+            .callout-emoji {
+                font-size: 2rem;
+                margin-bottom: 0.75rem;
+            }
+            .callout-title {
+                font-size: 0.7rem;
+                font-weight: 600;
+                color: var(--text-secondary);
+                text-transform: uppercase;
+                letter-spacing: 0.1em;
+            }
+            .callout-name {
+                font-family: "Bebas Neue", sans-serif;
+                font-size: 1.75rem;
+                margin: 0.25rem 0;
+            }
+            .callout-record {
+                font-size: 0.9rem;
+                color: var(--text-secondary);
+            }
+            .callout-record .highlight {
+                font-weight: 700;
+                color: var(--text-primary);
+            }
+
+            /* Stats Grid */
+            .stats-section {
+                margin: 2rem 0;
+            }
+            .section-title {
+                font-family: "Bebas Neue", sans-serif;
+                font-size: 1.5rem;
+                margin-bottom: 1rem;
+                display: flex;
+                align-items: center;
+                gap: 0.75rem;
+            }
+            .section-title::before {
+                content: "";
+                width: 8px;
+                height: 8px;
+                background: var(--ball-yellow);
+                border-radius: 50%;
+                box-shadow: 0 0 12px rgba(204, 255, 0, 0.6);
+            }
+
+            .stats-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+                gap: 1rem;
+            }
+
+            .stat-card {
+                background: var(--card-bg);
+                border-radius: 12px;
+                padding: 1.25rem;
+                border: 1px solid rgba(255, 255, 255, 0.05);
+                transition: transform 0.3s;
+            }
+
+            .stat-card:hover {
+                transform: translateY(-2px);
+            }
+
+            .stat-label {
+                font-size: 0.7rem;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+                color: var(--text-secondary);
+                margin-bottom: 0.5rem;
+            }
+
+            .stat-value {
+                font-family: "Bebas Neue", sans-serif;
+                font-size: 2rem;
+                line-height: 1;
+            }
+
+            .stat-value .win {
+                color: var(--win);
+            }
+            .stat-value .loss {
+                color: var(--loss);
+            }
+            .stat-detail {
+                font-size: 0.75rem;
+                color: var(--text-secondary);
+                margin-top: 0.25rem;
+            }
+
+            /* Opponents */
+            .opponents-section {
+                margin: 2rem 0;
+            }
+
+            .opponent-card {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 1rem 1.25rem;
+                background: var(--card-bg);
+                border-radius: 12px;
+                margin-bottom: 0.75rem;
+                border: 1px solid rgba(255, 255, 255, 0.05);
+                transition: transform 0.2s;
+            }
+
+            .opponent-card:hover {
+                transform: translateX(4px);
+            }
+
+            .opponent-info {
+                display: flex;
+                align-items: center;
+                gap: 1rem;
+            }
+            .opponent-rank {
+                width: 28px;
+                height: 28px;
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 8px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-weight: 700;
+                font-size: 0.8rem;
+            }
+            .opponent-name {
+                font-weight: 600;
+            }
+            .opponent-utr {
+                font-size: 0.8rem;
+                color: var(--text-secondary);
+            }
+
+            .opponent-stats {
+                display: flex;
+                align-items: center;
+                gap: 1.5rem;
+                text-align: right;
+            }
+            .opponent-record {
+                font-family: "Bebas Neue", sans-serif;
+                font-size: 1.5rem;
+            }
+            .opponent-games {
+                font-size: 0.75rem;
+                color: var(--text-secondary);
+            }
+
+            /* Games Record */
+            .games-banner {
+                background: linear-gradient(
+                    135deg,
+                    rgba(139, 92, 246, 0.2),
+                    rgba(204, 255, 0, 0.1)
+                );
+                border-radius: 16px;
+                padding: 1.5rem 2rem;
+                margin: 1.5rem 0;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                border: 1px solid rgba(139, 92, 246, 0.2);
+            }
+
+            .games-label {
+                font-weight: 600;
+                color: var(--text-secondary);
+            }
+            .games-value {
+                font-family: "Bebas Neue", sans-serif;
+                font-size: 2.5rem;
+            }
+            .games-pct {
+                background: rgba(255, 255, 255, 0.1);
+                padding: 0.5rem 1rem;
+                border-radius: 20px;
+                font-weight: 700;
+            }
+
+            @media (max-width: 768px) {
+                /* Removed year-badge styles */
+                .hero-record {
+                    flex-direction: column;
+                    gap: 1.5rem;
+                    padding: 2rem;
+                }
+                .hero-number {
+                    font-size: 3.5rem;
+                }
+                .hero-divider {
+                    width: 80px;
+                    height: 2px;
+                }
+                .callouts-grid {
+                    grid-template-columns: 1fr;
+                }
+                .stats-grid {
+                    grid-template-columns: repeat(2, 1fr);
+                }
+                .games-banner {
+                    flex-direction: column;
+                    gap: 1rem;
+                    text-align: center;
+                }
+            }
+
+            .hidden {
+                display: none;
+            }
+            .no-data {
+                text-align: center;
+                padding: 4rem;
+                background: var(--card-bg);
+                border-radius: 16px;
+                color: var(--text-secondary);
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <header>
+                <div class="subtitle">2025 Year in Review</div>
+            </header>
+
+            <!-- User Generator Form -->
+            <div
+                id="user-generator"
+                style="
+                    display: none;
+                    max-width: 500px;
+                    margin: 2rem auto;
+                    padding: 2rem;
+                    background: rgba(255, 255, 255, 0.05);
+                    border-radius: 12px;
+                    border: 1px solid rgba(255, 255, 255, 0.1);
+                "
+            >
+                <h2
+                    style="
+                        color: var(--ball-yellow);
+                        margin-bottom: 1.5rem;
+                        font-family: &quot;Bebas Neue&quot;, sans-serif;
+                        font-size: 2rem;
+                    "
+                >
+                    Generate Your Own Review
+                </h2>
+                <form id="review-form">
+                    <div style="margin-bottom: 1rem">
+                        <label
+                            style="
+                                display: block;
+                                margin-bottom: 0.5rem;
+                                color: var(--text-secondary);
+                                font-weight: 600;
+                            "
+                            >UTR Profile ID</label
+                        >
+                        <input
+                            type="text"
+                            id="profile-id"
+                            placeholder="e.g., 123456"
+                            required
+                            style="
+                                width: 100%;
+                                padding: 0.75rem;
+                                border: 1px solid rgba(255, 255, 255, 0.2);
+                                border-radius: 8px;
+                                background: rgba(0, 0, 0, 0.3);
+                                color: white;
+                                font-size: 1rem;
+                                font-family: &quot;Outfit&quot;, sans-serif;
+                            "
+                        />
+                        <small
+                            style="
+                                display: block;
+                                margin-top: 0.5rem;
+                                color: var(--text-secondary);
+                                font-size: 0.85rem;
+                                line-height: 1.4;
+                            "
+                        >
+                            💡 <strong>How to find your Profile ID:</strong
+                            ><br />
+                            1. Go to
+                            <a
+                                href="https://app.utrsports.net/login"
+                                target="_blank"
+                                style="
+                                    color: var(--ball-yellow);
+                                    text-decoration: underline;
+                                "
+                                >app.utrsports.net</a
+                            >
+                            and log in<br />
+                            2. Navigate to your profile page<br />
+                            3. Look at the URL - it will look like:
+                            <code
+                                style="
+                                    background: rgba(0, 0, 0, 0.3);
+                                    padding: 0.2rem 0.4rem;
+                                    border-radius: 4px;
+                                "
+                                >app.utrsports.net/profiles/123456</code
+                            ><br />
+                            4. The number at the end (123456) is your Profile ID
+                        </small>
+                    </div>
+
+                    <button
+                        type="submit"
+                        id="generate-btn"
+                        style="
+                            width: 100%;
+                            padding: 1rem;
+                            background: var(--ball-yellow);
+                            color: var(--tennis-green);
+                            border: none;
+                            border-radius: 8px;
+                            font-size: 1.1rem;
+                            font-weight: 600;
+                            cursor: pointer;
+                            transition: opacity 0.2s;
+                            font-family: &quot;Outfit&quot;, sans-serif;
+                        "
+                        onmouseover="this.style.opacity = '0.9'"
+                        onmouseout="this.style.opacity = '1'"
+                    >
+                        Generate Review
+                    </button>
+                </form>
+
+                <div
+                    id="form-status"
+                    style="
+                        margin-top: 1.5rem;
+                        padding: 1rem;
+                        border-radius: 8px;
+                        display: none;
+                    "
+                ></div>
+            </div>
+
+            <div class="player-section">
+                <div class="player-name" id="player-name">Loading...</div>
+                <div class="current-utr" id="current-utr">UTR ?</div>
+                <button
+                    id="show-generator-btn"
+                    onclick="
+                        document.getElementById(
+                            'user-generator',
+                        ).style.display = 'block';
+                        this.style.display = 'none';
+                    "
+                    style="
+                        display: none;
+                        margin-left: 1rem;
+                        padding: 0.5rem 1rem;
+                        background: rgba(139, 92, 246, 0.3);
+                        border: 1px solid var(--accent);
+                        color: var(--accent);
+                        border-radius: 8px;
+                        cursor: pointer;
+                        font-family: &quot;Outfit&quot;, sans-serif;
+                        font-weight: 600;
+                        font-size: 0.9rem;
+                        transition: all 0.3s;
+                    "
+                    onmouseover="
+                        this.style.background = 'rgba(139, 92, 246, 0.5)'
+                    "
+                    onmouseout="
+                        this.style.background = 'rgba(139, 92, 246, 0.3)'
+                    "
+                >
+                    Generate New Review
+                </button>
+            </div>
+
+            <!-- Tabs -->
+            <div class="tab-container"></div>
+
+            <div id="singles-content"></div>
+        </div>
+
+        <script>
+            let reviewData = null;
+
+            // Check URL for profile ID on page load (e.g., utrstats.com/904826)
+            async function checkUrlForProfileId() {
+                const path = window.location.pathname;
+                const profileIdMatch = path.match(/\/(\d{4,10})$/);
+
+                if (profileIdMatch) {
+                    const profileId = profileIdMatch[1];
+                    console.log("Profile ID found in URL:", profileId);
+
+                    // Hide the form and show processing message
+                    const userGenerator =
+                        document.getElementById("user-generator");
+                    if (userGenerator) {
+                        userGenerator.style.display = "none";
+                    }
+
+                    // Show processing overlay
+                    showProcessingOverlay(profileId);
+
+                    // Make API call directly in the background
+                    const API_URL =
+                        "https://tka3bt4pi4.execute-api.us-east-1.amazonaws.com/prod/generate";
+
+                    try {
+                        const response = await fetch(API_URL, {
+                            method: "POST",
+                            headers: {
+                                "Content-Type": "application/json",
+                            },
+                            body: JSON.stringify({ profileId: profileId }),
+                        });
+
+                        if (response.ok) {
+                            const result = await response.json();
+
+                            if (result.success && result.data) {
+                                // Data is ready! Display it
+                                reviewData = result.data;
+                                hideProcessingOverlay();
+                                renderAll();
+                            } else if (
+                                result.success === false &&
+                                result.message &&
+                                (result.message.includes("check back") ||
+                                    result.message.includes("being processed"))
+                            ) {
+                                // Still processing - show polling message
+                                updateProcessingMessage(
+                                    "Your review is being generated. Please wait 30-60 seconds...",
+                                );
+                                // Poll for completion
+                                pollForCompletion(profileId);
+                            } else {
+                                // Error occurred
+                                showError(
+                                    result.error ||
+                                        result.message ||
+                                        "Unknown error",
+                                );
+                            }
+                        } else if (response.status === 504) {
+                            // Gateway timeout - Lambda is still working in background
+                            updateProcessingMessage(
+                                "⏳ Generation in progress...<br><span style='font-size: 1rem;'>The server is processing your request. This may take 30-60 seconds.</span>",
+                            );
+                            // Start polling immediately since Lambda is likely still running
+                            pollForCompletion(profileId);
+                        } else {
+                            showError(`Server error: ${response.status}`);
+                        }
+                    } catch (error) {
+                        console.error("Error fetching review:", error);
+                        // Treat network errors as potential timeouts - start polling
+                        updateProcessingMessage(
+                            "⏳ Generation in progress...<br><span style='font-size: 1rem;'>Your review is being generated. Checking status...</span>",
+                        );
+                        pollForCompletion(profileId);
+                    }
+                }
+            }
+
+            function showProcessingOverlay(profileId) {
+                const content = document.getElementById("singles-content");
+                if (content) {
+                    content.innerHTML = `
+                        <div id="processing-overlay" style="text-align: center; padding: 4rem 2rem;">
+                            <div style="font-size: 3rem; margin-bottom: 1rem;">⏳</div>
+                            <h2 style="font-size: 2rem; margin-bottom: 1rem; color: var(--ball-yellow);">
+                                Generating Your 2025 Review
+                            </h2>
+                            <p id="processing-message" style="font-size: 1.25rem; color: var(--text-secondary); margin-bottom: 2rem;">
+                                Fetching data for profile ${profileId}...<br>
+                                <span style="font-size: 1rem;">This typically takes 30-60 seconds</span>
+                            </p>
+                            <div class="loading-spinner" style="margin: 2rem auto;"></div>
+                        </div>
+                    `;
+                }
+                document.getElementById("player-name").textContent =
+                    "Loading...";
+                document.getElementById("current-utr").textContent = "UTR ?";
+            }
+
+            function updateProcessingMessage(message) {
+                const msgElement =
+                    document.getElementById("processing-message");
+                if (msgElement) {
+                    msgElement.innerHTML = message;
+                }
+            }
+
+            function hideProcessingOverlay() {
+                const overlay = document.getElementById("processing-overlay");
+                if (overlay) {
+                    overlay.remove();
+                }
+            }
+
+            function showError(errorMessage) {
+                const content = document.getElementById("singles-content");
+                if (content) {
+                    content.innerHTML = `
+                        <div style="text-align: center; padding: 4rem 2rem;">
+                            <div style="font-size: 3rem; margin-bottom: 1rem;">❌</div>
+                            <h2 style="font-size: 2rem; margin-bottom: 1rem; color: #ef4444;">
+                                Error
+                            </h2>
+                            <p style="font-size: 1.25rem; color: var(--text-secondary); margin-bottom: 2rem;">
+                                ${errorMessage}
+                            </p>
+                            <button onclick="location.reload()" style="padding: 1rem 2rem; font-size: 1rem; background: var(--accent); color: white; border: none; border-radius: 8px; cursor: pointer;">
+                                Try Again
+                            </button>
+                        </div>
+                    `;
+                }
+            }
+
+            async function pollForCompletion(profileId) {
+                const API_URL =
+                    "https://tka3bt4pi4.execute-api.us-east-1.amazonaws.com/prod/generate";
+                const maxAttempts = 24; // Poll for up to 2 minutes
+                let attempts = 0;
+
+                const poll = async () => {
+                    attempts++;
+
+                    try {
+                        const response = await fetch(API_URL, {
+                            method: "POST",
+                            headers: {
+                                "Content-Type": "application/json",
+                            },
+                            body: JSON.stringify({ profileId: profileId }),
+                        });
+
+                        if (response.ok) {
+                            const result = await response.json();
+
+                            if (result.success && result.data) {
+                                // Success! Display the data
+                                reviewData = result.data;
+                                hideProcessingOverlay();
+                                renderAll();
+                            } else if (attempts >= maxAttempts) {
+                                // Timeout
+                                showError(
+                                    "Request timed out. Please refresh the page to try again.",
+                                );
+                            } else {
+                                // Still processing, poll again
+                                const elapsed = attempts * 5;
+                                updateProcessingMessage(
+                                    `Still generating... (${elapsed}s elapsed)<br><span style="font-size: 1rem;">This typically takes 30-60 seconds</span>`,
+                                );
+                                setTimeout(poll, 5000); // Poll every 5 seconds
+                            }
+                        } else if (response.status === 504) {
+                            // Timeout on poll - keep trying
+                            if (attempts >= maxAttempts) {
+                                showError(
+                                    "Request timed out. Please refresh the page to try again.",
+                                );
+                            } else {
+                                const elapsed = attempts * 5;
+                                updateProcessingMessage(
+                                    `Still generating... (${elapsed}s elapsed)<br><span style="font-size: 1rem;">Almost ready...</span>`,
+                                );
+                                setTimeout(poll, 5000);
+                            }
+                        } else {
+                            showError(`Server error: ${response.status}`);
+                        }
+                    } catch (error) {
+                        console.error("Polling error:", error);
+                        if (attempts >= maxAttempts) {
+                            showError(
+                                "Failed to fetch review. Please refresh the page to try again.",
+                            );
+                        } else {
+                            setTimeout(poll, 5000); // Retry
+                        }
+                    }
+                };
+
+                // Start polling after 3 seconds (give Lambda time to process)
+                setTimeout(poll, 3000);
+            }
+
+            async function loadData() {
+                try {
+                    const response = await fetch("year-in-review.json");
+                    if (!response.ok) {
+                        throw new Error(
+                            `HTTP error! status: ${response.status}`,
+                        );
+                    }
+                    reviewData = await response.json();
+                    console.log("Data loaded:", reviewData);
+                    renderAll();
+                    // Hide form and show button if data loads successfully
+                    const userGenerator =
+                        document.getElementById("user-generator");
+                    if (userGenerator) userGenerator.style.display = "none";
+                    const showBtn =
+                        document.getElementById("show-generator-btn");
+                    if (showBtn) showBtn.style.display = "block";
+                    return Promise.resolve();
+                } catch (e) {
+                    console.error("Error loading data:", e);
+                    // Show form if no data file exists
+                    const userGenerator =
+                        document.getElementById("user-generator");
+                    if (userGenerator) {
+                        userGenerator.style.display = "block";
+                    }
+                    document.getElementById("player-name").textContent =
+                        "Generate Your Review";
+                    document.getElementById("current-utr").textContent =
+                        "UTR ?";
+                    document.getElementById("singles-content").innerHTML = `
+                    <div class="no-data">
+                        <p style="font-size: 1.25rem; margin-bottom: 1rem;">No data found</p>
+                        <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+                            Use the form above to generate your own UTR Year in Review, or run the scraper locally:
+                        </p>
+                        <code style="display: block; margin: 1rem auto; padding: 1rem; background: rgba(0,0,0,0.3); border-radius: 8px; max-width: 400px; font-size: 0.85rem;">
+                            node scraper-full.js 123456<br>
+                            node generate-full-review.js 123456 2025
+                        </code>
+                    </div>
+                `;
+                    return Promise.reject(e);
+                }
+            }
+
+            function updateUtrDisplay() {
+                if (!reviewData || !reviewData.player) return;
+                const utrElement = document.getElementById("current-utr");
+                const utr = reviewData.player.singlesUtr;
+                utrElement.textContent = "UTR " + (utr ? utr.toFixed(2) : "?");
+            }
+
+            function renderAll() {
+                if (!reviewData) {
+                    console.error("No review data available");
+                    return;
+                }
+                // Year is always 2025, no need to update display
+                document.getElementById("player-name").textContent =
+                    (reviewData.player && reviewData.player.name) ||
+                    "Loading...";
+                updateUtrDisplay();
+
+                if (reviewData.singles) {
+                    renderStats(
+                        "singles",
+                        reviewData.singles,
+                        document.getElementById("singles-content"),
+                    );
+                } else {
+                    document.getElementById("singles-content").innerHTML = `
+                    <div class="no-data">
+                        <p style="font-size: 1.5rem; margin-bottom: 1rem;">No singles data found</p>
+                        <p style="color: var(--text-secondary)">
+                            Run the scraper to get match data.
+                        </p>
+                    </div>
+                `;
+                }
+            }
+
+            function renderStats(type, stats, container) {
+                if (
+                    !stats ||
+                    (stats.record.wins === 0 && stats.record.losses === 0)
+                ) {
+                    container.innerHTML = `
+                    <div class="no-data">
+                        <p style="font-size: 1.5rem; margin-bottom: 1rem;">No ${type} matches recorded</p>
+                        <p style="color: var(--text-secondary)">
+                            Run the scraper to get match data.
+                        </p>
+                    </div>
+                `;
+                    return;
+                }
+                const s = stats;
+                const gr = s.gamesRecord || { won: 0, lost: 0, winPct: 0 };
+
+                container.innerHTML = `
+                <!-- Hero Record -->
+                <div class="hero-record">
+                    <div class="hero-stat">
+                        <div class="hero-number" style="color: var(--win)">${s.record.wins}</div>
+                        <div class="hero-label">Wins</div>
+                    </div>
+                    <div class="hero-divider"></div>
+                    <div class="hero-stat">
+                        <div class="hero-number" style="color: var(--loss)">${s.record.losses}</div>
+                        <div class="hero-label">Losses</div>
+                    </div>
+                    <div class="hero-divider"></div>
+                    <div class="hero-stat">
+                        <div class="hero-number" style="color: var(--ball-yellow)">${s.record.winPct}%</div>
+                        <div class="hero-label">Win Rate</div>
+                    </div>
+                </div>
+
+                <!-- Rivalry Callouts -->
+                ${
+                    s.dominatedOpponent || s.nemesis || s.closestRival
+                        ? `
+                <div class="callouts-grid" style="grid-template-columns: repeat(3, 1fr);">
+                    ${
+                        s.dominatedOpponent
+                            ? `
+                    <div class="callout-card dominated">
+                        <div class="callout-emoji">🎯</div>
+                        <div class="callout-title">Dominated</div>
+                        <div class="callout-name">${s.dominatedOpponent.name}</div>
+                        <div class="callout-record">
+                            Record: <span class="highlight">${s.dominatedOpponent.record}</span><br>
+                            Games: ${s.dominatedOpponent.gamesRecord}
+                        </div>
+                    </div>
+                    `
+                            : '<div class="callout-card" style="opacity:0.3"><div class="callout-emoji">🎯</div><div class="callout-title">Dominated</div><div class="callout-name">—</div></div>'
+                    }
+
+                    ${
+                        s.nemesis
+                            ? `
+                    <div class="callout-card nemesis">
+                        <div class="callout-emoji">😤</div>
+                        <div class="callout-title">Nemesis</div>
+                        <div class="callout-name">${s.nemesis.name}</div>
+                        <div class="callout-record">
+                            Record: <span class="highlight">${s.nemesis.record}</span><br>
+                            Games: ${s.nemesis.gamesRecord}
+                        </div>
+                    </div>
+                    `
+                            : '<div class="callout-card" style="opacity:0.3"><div class="callout-emoji">😤</div><div class="callout-title">Nemesis</div><div class="callout-name">—</div></div>'
+                    }
+
+                    ${
+                        s.closestRival
+                            ? `
+                    <div class="callout-card rival">
+                        <div class="callout-emoji">⚔️</div>
+                        <div class="callout-title">Closest Rival</div>
+                        <div class="callout-name">${s.closestRival.name}</div>
+                        <div class="callout-record">
+                            Record: <span class="highlight">${s.closestRival.record}</span><br>
+                            Game Diff: ${s.closestRival.gameDiff}
+                        </div>
+                    </div>
+                    `
+                            : '<div class="callout-card" style="opacity:0.3"><div class="callout-emoji">⚔️</div><div class="callout-title">Closest Rival</div><div class="callout-name">—</div></div>'
+                    }
+                </div>
+                `
+                        : ""
+                }
+
+                <!-- Best Win / Worst Loss -->
+                ${
+                    s.bestWin || s.worstLoss
+                        ? `
+                <div class="callouts-grid" style="grid-template-columns: repeat(2, 1fr); margin-top: 1.5rem;">
+                    ${
+                        s.bestWin
+                            ? `
+                    <div class="callout-card" style="border-left: 3px solid var(--win);">
+                        <div class="callout-emoji">🏆</div>
+                        <div class="callout-title">Best Win</div>
+                        <div class="callout-name">${s.bestWin.opponent}</div>
+                        <div class="callout-record">
+                            Score: <span class="highlight">${s.bestWin.score}</span><br>
+                            UTR: ${s.bestWin.myUtr ? s.bestWin.myUtr.toFixed(2) : "?"} vs ${s.bestWin.opponentUtr ? s.bestWin.opponentUtr.toFixed(2) : "?"}<br>
+                            <span style="color: var(--win)">+${s.bestWin.utrDiff ? s.bestWin.utrDiff.toFixed(2) : "?"} UTR</span>
+                        </div>
+                    </div>
+                    `
+                            : '<div class="callout-card" style="opacity:0.3"><div class="callout-emoji">🏆</div><div class="callout-title">Best Win</div><div class="callout-name">—</div></div>'
+                    }
+
+                    ${
+                        s.worstLoss
+                            ? `
+                    <div class="callout-card" style="border-left: 3px solid var(--loss);">
+                        <div class="callout-emoji">😔</div>
+                        <div class="callout-title">Worst Loss</div>
+                        <div class="callout-name">${s.worstLoss.opponent}</div>
+                        <div class="callout-record">
+                            Score: <span class="highlight">${s.worstLoss.score}</span><br>
+                            UTR: ${s.worstLoss.myUtr ? s.worstLoss.myUtr.toFixed(2) : "?"} vs ${s.worstLoss.opponentUtr ? s.worstLoss.opponentUtr.toFixed(2) : "?"}<br>
+                            <span style="color: var(--loss)">${s.worstLoss.utrDiff ? s.worstLoss.utrDiff.toFixed(2) : "?"} UTR</span>
+                        </div>
+                    </div>
+                    `
+                            : '<div class="callout-card" style="opacity:0.3"><div class="callout-emoji">😔</div><div class="callout-title">Worst Loss</div><div class="callout-name">—</div></div>'
+                    }
+                </div>
+                `
+                        : ""
+                }
+
+                <!-- Games Record Banner -->
+                <div class="games-banner">
+                    <div>
+                        <div class="games-label">Total Games</div>
+                        <div class="games-value">
+                            <span style="color: var(--win)">${gr.won}</span> - <span style="color: var(--loss)">${gr.lost}</span>
+                        </div>
+                    </div>
+                    <div class="games-pct">${gr.winPct || 0}% of games won</div>
+                </div>
+
+                <!-- Performance Stats -->
+                <div class="stats-section">
+                    <div class="section-title">Performance</div>
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <div class="stat-label">vs Higher Rated</div>
+                            <div class="stat-value"><span class="win">${s.vsHigherRated.wins}</span>-<span class="loss">${s.vsHigherRated.losses}</span></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">vs Lower Rated</div>
+                            <div class="stat-value"><span class="win">${s.vsLowerRated.wins}</span>-<span class="loss">${s.vsLowerRated.losses}</span></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">🎯 Tiebreaks (7-6)</div>
+                            <div class="stat-value"><span class="win">${s.tiebreaks.won}</span>-<span class="loss">${s.tiebreaks.lost}</span></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">⚡ Super Tiebreaks</div>
+                            <div class="stat-value"><span class="win">${s.superTiebreaks.won}</span>-<span class="loss">${s.superTiebreaks.lost}</span></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">🎲 Won with Fewer Games</div>
+                            <div class="stat-value"><span class="win">${s.gamesDifferential?.wonWithFewer || 0}</span></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">😤 Lost with More Games</div>
+                            <div class="stat-value"><span class="loss">${s.gamesDifferential?.lostWithMore || 0}</span></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">📊 Sets Record</div>
+                            <div class="stat-value"><span class="win">${s.setsRecord.won}</span>-<span class="loss">${s.setsRecord.lost}</span></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">🏁 Deciding Sets</div>
+                            <div class="stat-value"><span class="win">${s.decidingSets.won}</span>-<span class="loss">${s.decidingSets.lost}</span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Fun Stats -->
+                <div class="stats-section">
+                    <div class="section-title">Highlights</div>
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <div class="stat-label">🍩 Bagels Given (6-0)</div>
+                            <div class="stat-value win">${s.bagels.given}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">🍩 Bagels Received (0-6)</div>
+                            <div class="stat-value loss">${s.bagels.received}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">🥖 Breadsticks Given (6-1)</div>
+                            <div class="stat-value win">${s.breadsticks.given}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">🥖 Breadsticks Received (1-6)</div>
+                            <div class="stat-value loss">${s.breadsticks.received}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">🔥 Win Streak</div>
+                            <div class="stat-value win">${s.longestWinStreak}</div>
+                            <div class="stat-detail">Longest streak</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">📉 Loss Streak</div>
+                            <div class="stat-value loss">${s.longestLossStreak}</div>
+                            <div class="stat-detail">Longest streak</div>
+                        </div>
+                        ${
+                            s.comebacks
+                                ? `
+                        <div class="stat-card">
+                            <div class="stat-label">💪 Comebacks</div>
+                            <div class="stat-value">${s.comebacks.won}</div>
+                            <div class="stat-detail">Won after losing 1st set</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">😰 Chokes</div>
+                            <div class="stat-value">${s.comebacks.lost}</div>
+                            <div class="stat-detail">Lost after winning 1st set</div>
+                        </div>
+                        `
+                                : ""
+                        }
+                        ${
+                            s.bestMonth
+                                ? `
+                        <div class="stat-card">
+                            <div class="stat-label">📅 Best Month</div>
+                            <div class="stat-value win">${s.bestMonth.month}</div>
+                            <div class="stat-detail">${s.bestMonth.wins}-${s.bestMonth.losses} (${s.bestMonth.winPct}%)</div>
+                        </div>
+                        `
+                                : ""
+                        }
+                        ${
+                            s.worstMonth
+                                ? `
+                        <div class="stat-card">
+                            <div class="stat-label">📉 Toughest Month</div>
+                            <div class="stat-value loss">${s.worstMonth.month}</div>
+                            <div class="stat-detail">${s.worstMonth.wins}-${s.worstMonth.losses} (${s.worstMonth.winPct}%)</div>
+                        </div>
+                        `
+                                : ""
+                        }
+                    </div>
+                </div>
+
+                <!-- Frequent Opponents / Teams -->
+                ${
+                    s.frequentOpponents && s.frequentOpponents.length > 0
+                        ? `
+                <div class="opponents-section">
+                    <div class="section-title">Frequent Opponents</div>
+                    ${s.frequentOpponents
+                        .map(
+                            (opp, idx) => `
+                        <div class="opponent-card">
+                            <div class="opponent-info">
+                                <div class="opponent-rank">${idx + 1}</div>
+                                <div>
+                                    <div class="opponent-name">${opp.name}</div>
+                                    <div class="opponent-utr">UTR ${opp.utr ? opp.utr.toFixed(2) : "?"} • ${opp.played} matches</div>
+                                </div>
+                            </div>
+                            <div class="opponent-stats">
+                                <div>
+                                    <div class="opponent-record">
+                                        <span style="color: var(--win)">${opp.record.split("-")[0]}</span>-<span style="color: var(--loss)">${opp.record.split("-")[1]}</span>
+                                    </div>
+                                    <div class="opponent-games">Games: ${opp.gamesRecord}</div>
+                                </div>
+                            </div>
+                        </div>
+                    `,
+                        )
+                        .join("")}
+                </div>
+                `
+                        : ""
+                }
+
+                <!-- Quality Wins / H2H Network -->
+                ${
+                    s.h2hNetwork &&
+                    s.h2hNetwork.qualityWins &&
+                    s.h2hNetwork.qualityWins.length > 0
+                        ? `
+                <div class="opponents-section">
+                    <div class="section-title">🏆 Quality Wins (Biggest Upsets)</div>
+                    ${s.h2hNetwork.qualityWins
+                        .map(
+                            (win) => `
+                        <div class="opponent-card">
+                            <div class="opponent-info">
+                                <div class="opponent-rank">+${win.utrDiff}</div>
+                                <div>
+                                    <div class="opponent-name">${win.player}</div>
+                                    <div class="opponent-utr">${win.note}</div>
+                                </div>
+                            </div>
+                        </div>
+                    `,
+                        )
+                        .join("")}
+                </div>
+                `
+                        : ""
+                }
+
+                ${
+                    s.h2hNetwork &&
+                    s.h2hNetwork.connections &&
+                    s.h2hNetwork.connections.length > 0
+                        ? `
+                <div class="opponents-section">
+                    <div class="section-title">🔄 Head-to-Head Battles</div>
+                    ${s.h2hNetwork.connections
+                        .map(
+                            (conn) => `
+                        <div class="opponent-card">
+                            <div class="opponent-info">
+                                <div>
+                                    <div class="opponent-name">${conn.player}</div>
+                                    <div class="opponent-utr">${conn.note}</div>
+                                </div>
+                            </div>
+                        </div>
+                    `,
+                        )
+                        .join("")}
+                </div>
+                `
+                        : ""
+                }
+
+            `;
+            }
+
+            // API URL for generating reviews
+            const API_URL =
+                "https://tka3bt4pi4.execute-api.us-east-1.amazonaws.com/prod/generate";
+
+            // Check for cached files when profile ID is entered
+            async function checkCachedFiles(profileId) {
+                if (!profileId || !/^\d+$/.test(profileId)) {
+                    return [];
+                }
+
+                try {
+                    // Use GET request to the same endpoint with profileId query parameter
+                    const response = await fetch(
+                        `${API_URL}?profileId=${profileId}`,
+                        {
+                            method: "GET",
+                        },
+                    );
+                    if (response.ok) {
+                        const result = await response.json();
+                        return result.cachedFiles || [];
+                    }
+                } catch (error) {
+                    console.error("Error checking cached files:", error);
+                }
+                return [];
+            }
+
+            // User review form handler
+            (function () {
+                const form = document.getElementById("review-form");
+                const status = document.getElementById("form-status");
+                const generateBtn = document.getElementById("generate-btn");
+                const profileIdInput = document.getElementById("profile-id");
+                const cachedFilesDiv = document.getElementById("cached-files");
+                const userGenerator = document.getElementById("user-generator");
+
+                // Show form if no data is loaded, or add a button to show it
+                if (form) {
+                    form.addEventListener("submit", async (e) => {
+                        e.preventDefault();
+
+                        const profileId = document
+                            .getElementById("profile-id")
+                            .value.trim();
+
+                        // Validate profile ID
+                        if (!profileId || !/^\d{4,10}$/.test(profileId)) {
+                            status.style.display = "block";
+                            status.style.background = "rgba(255,0,0,0.2)";
+                            status.style.color = "#f87171";
+                            status.textContent =
+                                "❌ Please enter a valid profile ID (4-10 digits)";
+                            return;
+                        }
+
+                        // Redirect to the URL with the profile ID
+                        window.location.href = `/${profileId}`;
+                        return;
+
+                        // OLD CODE BELOW - keeping for reference but won't execute
+                        const data = {
+                            profileId: profileId,
+                        };
+
+                        try {
+                            const response = await fetch(API_URL, {
+                                method: "POST",
+                                headers: {
+                                    "Content-Type": "application/json",
+                                },
+                                body: JSON.stringify(data),
+                            });
+
+                            if (response.ok) {
+                                const result = await response.json();
+
+                                // Check if there's an error in the response
+                                if (result.success === false) {
+                                    // Check if it's a "processing" or "check back" message
+                                    if (
+                                        result.message &&
+                                        (result.message.includes(
+                                            "check back",
+                                        ) ||
+                                            result.message.includes(
+                                                "being processed",
+                                            ))
+                                    ) {
+                                        status.style.background =
+                                            "rgba(255,165,0,0.2)";
+                                        status.style.color = "#fbbf24";
+                                        status.textContent =
+                                            "⏳ " + result.message;
+                                    } else {
+                                        status.style.background =
+                                            "rgba(255,0,0,0.2)";
+                                        status.style.color = "#f87171";
+                                        status.textContent =
+                                            "❌ Error: " +
+                                            (result.error ||
+                                                result.message ||
+                                                "Failed to generate review");
+                                    }
+                                    return;
+                                }
+
+                                // Lambda returns JSON data for display
+                                if (result.success && result.data) {
+                                    // Load the data and display stats
+                                    reviewData = result.data;
+                                    renderAll();
+
+                                    // Hide form and show stats
+                                    const userGenerator =
+                                        document.getElementById(
+                                            "user-generator",
+                                        );
+                                    if (userGenerator) {
+                                        userGenerator.style.display = "none";
+                                    }
+
+                                    status.style.background =
+                                        "rgba(0,255,0,0.2)";
+                                    status.style.color = "#4ade80";
+                                    status.textContent =
+                                        "✅ Review generated successfully! " +
+                                        (result.message || "");
+                                    status.style.display = "block";
+                                } else {
+                                    // Unexpected response format - log full response for debugging
+                                    status.style.background =
+                                        "rgba(255,165,0,0.2)";
+                                    status.style.color = "#fbbf24";
+                                    status.textContent =
+                                        "⚠️ Response received but format unexpected. Check console.";
+                                    console.log(
+                                        "Full response:",
+                                        JSON.stringify(result, null, 2),
+                                    );
+                                    console.log(
+                                        "Response keys:",
+                                        Object.keys(result),
+                                    );
+                                    console.log(
+                                        "result.success:",
+                                        result.success,
+                                    );
+                                    console.log("result.data:", result.data);
+                                    console.log(
+                                        "result.data type:",
+                                        typeof result.data,
+                                    );
+                                }
+                            } else {
+                                // Error
+                                const errorResult = await response
+                                    .json()
+                                    .catch(() => ({ error: "Unknown error" }));
+                                status.style.background = "rgba(255,0,0,0.2)";
+                                status.style.color = "#f87171";
+                                status.textContent =
+                                    "❌ Error: " +
+                                    (errorResult.error ||
+                                        "Failed to generate review");
+                            }
+                        } catch (error) {
+                            status.style.background = "rgba(255,0,0,0.2)";
+                            status.style.color = "#f87171";
+                            let errorMsg = "❌ Error: ";
+                            if (
+                                error.name === "TypeError" &&
+                                error.message.includes("fetch")
+                            ) {
+                                errorMsg +=
+                                    "Network error. This could be a CORS issue or the API is down. ";
+                                errorMsg +=
+                                    "Check browser console (F12) for details.";
+                            } else {
+                                errorMsg += error.message;
+                            }
+                            status.textContent = errorMsg;
+                            console.error("Full error:", error);
+                        } finally {
+                            generateBtn.disabled = false;
+                            generateBtn.textContent = "Generate Review";
+                        }
+                    });
+                }
+            })();
+
+            // Always show form by default (don't try to load local data)
+            (function () {
+                const userGenerator = document.getElementById("user-generator");
+                if (userGenerator) {
+                    userGenerator.style.display = "block";
+                }
+
+                // Add listener to profile ID input to check for cached files
+                const profileIdInput = document.getElementById("profile-id");
+                const cachedFilesDiv = document.getElementById("cached-files");
+
+                if (profileIdInput && cachedFilesDiv) {
+                    let checkTimeout;
+                    profileIdInput.addEventListener("input", async (e) => {
+                        const profileId = e.target.value.trim();
+
+                        // Debounce the check
+                        clearTimeout(checkTimeout);
+                        checkTimeout = setTimeout(async () => {
+                            if (profileId && /^\d+$/.test(profileId)) {
+                                cachedFilesDiv.innerHTML =
+                                    '<p style="color: #6b7280; font-size: 0.875rem;">Checking for cached files...</p>';
+                                const cachedFiles =
+                                    await checkCachedFiles(profileId);
+
+                                if (cachedFiles.length > 0) {
+                                    let html =
+                                        '<p style="color: #10b981; font-size: 0.875rem; margin-bottom: 0.5rem;"><strong>✅ Cached files found:</strong></p>';
+                                    html +=
+                                        '<ul style="list-style: none; padding: 0; margin: 0;">';
+                                    cachedFiles.forEach((file) => {
+                                        const date = new Date(
+                                            file.lastModified,
+                                        ).toLocaleDateString();
+                                        html += `<li style="padding: 0.25rem 0; color: #6b7280; font-size: 0.875rem;">
+                                        📄 ${file.year} (${date}) - ${(file.size / 1024).toFixed(1)} KB
+                                    </li>`;
+                                    });
+                                    html += "</ul>";
+                                    cachedFilesDiv.innerHTML = html;
+                                } else {
+                                    cachedFilesDiv.innerHTML =
+                                        '<p style="color: #6b7280; font-size: 0.875rem;">No cached files found for this profile ID.</p>';
+                                }
+                            } else {
+                                cachedFilesDiv.innerHTML = "";
+                            }
+                        }, 500); // Wait 500ms after user stops typing
+                    });
+                }
+            })();
+
+            // Check URL for profile ID on page load
+            checkUrlForProfileId();
+        </script>
+    </body>
+</html>
