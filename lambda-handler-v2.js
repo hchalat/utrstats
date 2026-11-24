@@ -5,6 +5,7 @@ const { exec } = require("child_process");
 const { promisify } = require("util");
 const fs = require("fs");
 const path = require("path");
+const zlib = require("zlib");
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const {
   DynamoDBDocumentClient,
@@ -61,6 +62,86 @@ const PENDING_TIMEOUT_MINUTES = 15;
 // After a failed refresh, serve the stale bundle (flagged stale) for this long
 // before trying another scrape.
 const RETRY_BACKOFF_MINUTES = 60;
+// DynamoDB caps an item at 400 KB; an uncompressed bundle passes that at
+// roughly 700-800 matches, so bundles are stored gzipped (`dataGz`).
+const MAX_BUNDLE_BYTES = 380 * 1024;
+
+function packBundle(data) {
+  const gz = zlib.gzipSync(JSON.stringify(data));
+  if (gz.length > MAX_BUNDLE_BYTES) {
+    throw new Error(
+      `Bundle too large to store (${Math.round(gz.length / 1024)} KB compressed)`,
+    );
+  }
+  return gz;
+}
+
+// Reads either storage format: gzipped `dataGz`, or legacy plain `data`.
+function unpackBundle(item) {
+  if (!item) return null;
+  if (item.dataGz) {
+    return JSON.parse(zlib.gunzipSync(Buffer.from(item.dataGz)).toString("utf8"));
+  }
+  return item.data || null;
+}
+
+// Kick off a stale bundle's refresh as an async self-invocation so the
+// visitor gets the old data immediately. `refreshStartedAt` is a lock: one
+// refresh per profile at a time, reclaimable after PENDING_TIMEOUT_MINUTES.
+// Returns false only when no refresh could be started (caller refreshes
+// inline instead).
+async function startBackgroundRefresh(profileId, year) {
+  const functionName = process.env.AWS_LAMBDA_FUNCTION_NAME;
+  if (!lambdaClient || !functionName) return false;
+  const key = { profileId, year };
+  try {
+    await dynamoDocClient.send(
+      new UpdateCommand({
+        TableName: DYNAMODB_TABLE,
+        Key: key,
+        UpdateExpression: "SET refreshStartedAt = :now",
+        ConditionExpression:
+          "attribute_not_exists(refreshStartedAt) OR refreshStartedAt < :cutoff",
+        ExpressionAttributeValues: {
+          ":now": new Date().toISOString(),
+          ":cutoff": new Date(
+            Date.now() - PENDING_TIMEOUT_MINUTES * 60 * 1000,
+          ).toISOString(),
+        },
+      }),
+    );
+  } catch (e) {
+    if (e.name === "ConditionalCheckFailedException") {
+      console.log("Background refresh already running");
+      return true;
+    }
+    console.error("Could not claim refresh lock:", e.message);
+    return false;
+  }
+  try {
+    await lambdaClient.send(
+      new InvokeCommand({
+        FunctionName: functionName,
+        InvocationType: "Event",
+        Payload: JSON.stringify({ action: "refresh", profileId }),
+      }),
+    );
+    console.log("Background refresh started");
+    return true;
+  } catch (e) {
+    console.error("Could not start background refresh:", e.message);
+    await dynamoDocClient
+      .send(
+        new UpdateCommand({
+          TableName: DYNAMODB_TABLE,
+          Key: key,
+          UpdateExpression: "REMOVE refreshStartedAt",
+        }),
+      )
+      .catch(() => {});
+    return false;
+  }
+}
 
 // Rate limiting removed - DynamoDB pending status prevents duplicate expensive scrapes
 
@@ -423,35 +504,45 @@ async function checkCachedFiles(profileId) {
 
 // Wrap handler to catch ALL errors, including module loading errors
 const mainHandler = async (event) => {
-  // Handle internal async invocation (for background scraping)
-  if (event.action === "scrape") {
-    console.log("=== ASYNC SCRAPE REQUEST RECEIVED ===");
-    console.log("Event action:", event.action);
-    console.log("Profile ID:", event.profileId);
-    console.log("Year:", event.year);
-    console.log("Has credentials:", !!(event.utrEmail && event.utrPassword));
-
-    // CRITICAL: We MUST await here - Lambda will keep the execution context alive
-    // as long as the handler hasn't returned. If we return early, Lambda terminates.
-    console.log("Starting performScrapeAndUpload...");
+  // Background refresh of a stale bundle (async self-invocation from
+  // startBackgroundRefresh). The old bundle stays served until this lands.
+  if (event.action === "refresh") {
+    const profileId = String(event.profileId || "");
+    if (!/^\d{4,10}$/.test(profileId)) {
+      return { statusCode: 400, body: "invalid profileId" };
+    }
+    console.log(`=== Background refresh for ${profileId} ===`);
+    // We MUST await here - Lambda freezes the context once the handler returns.
     try {
       await performScrapeAndUpload(
-        event.profileId,
-        event.utrEmail,
-        event.utrPassword,
-        event.year,
+        profileId,
+        process.env.UTR_EMAIL,
+        process.env.UTR_PASSWORD,
+        BUNDLE_YEAR,
       );
-      console.log("=== Async scrape completed successfully ===");
-      return {
-        statusCode: 200,
-        body: JSON.stringify({ success: true, message: "Scrape completed" }),
-      };
+      console.log("=== Background refresh completed ===");
+      return { statusCode: 200, body: JSON.stringify({ success: true }) };
     } catch (error) {
-      console.error("=== Async scrape failed ===");
-      console.error("Error:", error);
-      console.error("Error name:", error.name);
-      console.error("Error message:", error.message);
-      console.error("Error stack:", error.stack);
+      console.error("=== Background refresh failed ===", error);
+      // Keep the existing bundle; record the failure so visitors get the
+      // retry backoff instead of re-triggering a scrape on every visit.
+      try {
+        await dynamoDocClient.send(
+          new UpdateCommand({
+            TableName: DYNAMODB_TABLE,
+            Key: { profileId, year: BUNDLE_YEAR },
+            UpdateExpression:
+              "SET lastError = :err, lastAttemptAt = :now REMOVE refreshStartedAt",
+            ConditionExpression: "attribute_exists(profileId)",
+            ExpressionAttributeValues: {
+              ":err": error.message,
+              ":now": new Date().toISOString(),
+            },
+          }),
+        );
+      } catch (dbError) {
+        console.error("Failed to record refresh failure:", dbError.message);
+      }
       return {
         statusCode: 500,
         body: JSON.stringify({ success: false, error: error.message }),
@@ -620,13 +711,17 @@ const mainHandler = async (event) => {
           `Found record: status=${item.status}, age=${ageDays.toFixed(1)} days`,
         );
 
-        if (item.status === "completed" && item.data) {
+        const cachedData =
+          item.status === "completed" || item.status === "pending"
+            ? unpackBundle(item)
+            : null;
+        if (item.status === "completed" && cachedData) {
           if (ageDays < MAX_DATA_AGE_DAYS) {
             console.log("Bundle is fresh, returning immediately");
             return corsResponse(200, {
               success: true,
               message: "Data retrieved from cache",
-              data: item.data,
+              data: cachedData,
             });
           }
           const lastAttempt = new Date(item.lastAttemptAt || 0).getTime();
@@ -637,14 +732,32 @@ const mainHandler = async (event) => {
               stale: true,
               message:
                 "Refresh failed recently; showing previously cached data.",
-              data: item.data,
+              data: cachedData,
             });
           }
-          console.log("Bundle is stale - refreshing");
+          // Stale-while-revalidate: serve the old bundle now, refresh behind it.
+          if (await startBackgroundRefresh(profileId, year)) {
+            return corsResponse(200, {
+              success: true,
+              refreshing: true,
+              message: "Showing cached data; a refresh is running.",
+              data: cachedData,
+            });
+          }
+          console.log("Bundle is stale - refreshing inline");
           staleUpdatedAt = item.updatedAt || item.createdAt || null;
           // Fall through to re-scrape.
         } else if (item.status === "pending") {
           const ageMinutes = (Date.now() - lastUpdated) / (60 * 1000);
+          if (ageMinutes < PENDING_TIMEOUT_MINUTES && cachedData) {
+            // An inline refresh of an existing bundle is running.
+            return corsResponse(200, {
+              success: true,
+              refreshing: true,
+              message: "Showing cached data; a refresh is running.",
+              data: cachedData,
+            });
+          }
           if (ageMinutes < PENDING_TIMEOUT_MINUTES) {
             console.log("Scrape already in progress");
             return corsResponse(200, {
@@ -720,32 +833,18 @@ const mainHandler = async (event) => {
     try {
       // Run the scrape and wait for it to complete
       console.log("Calling performScrapeAndUpload...");
-      await performScrapeAndUpload(profileId, utrEmail, utrPassword, year);
-      console.log("✅ Scrape completed successfully!");
-
-      // Fetch the completed data from DynamoDB
-      const result = await dynamoDocClient.send(
-        new GetCommand({
-          TableName: DYNAMODB_TABLE,
-          Key: { profileId, year },
-        }),
+      const bundle = await performScrapeAndUpload(
+        profileId,
+        utrEmail,
+        utrPassword,
+        year,
       );
-
-      if (result.Item && result.Item.status === "completed") {
-        console.log("Returning completed data immediately");
-        return corsResponse(200, {
-          success: true,
-          data: result.Item.data,
-          message: "Data generated successfully!",
-        });
-      } else {
-        // Shouldn't happen, but handle gracefully
-        console.error("Data generated but not found in DynamoDB");
-        return corsResponse(500, {
-          success: false,
-          error: "Data generation completed but result not found",
-        });
-      }
+      console.log("✅ Scrape completed successfully!");
+      return corsResponse(200, {
+        success: true,
+        data: bundle,
+        message: "Data generated successfully!",
+      });
     } catch (scrapeError) {
       console.error("Scrape failed:", scrapeError);
       console.error("Error name:", scrapeError.name);
@@ -762,8 +861,9 @@ const mainHandler = async (event) => {
             Key: { profileId, year },
           }),
         );
-        if (existing.Item && existing.Item.data) {
-          staleFallback = existing.Item.data;
+        const existingData = unpackBundle(existing.Item);
+        if (existingData) {
+          staleFallback = existingData;
           await dynamoDocClient.send(
             new UpdateCommand({
               TableName: DYNAMODB_TABLE,
@@ -778,7 +878,7 @@ const mainHandler = async (event) => {
                 ":now": new Date().toISOString(),
                 ":dataAt":
                   staleUpdatedAt ||
-                  existing.Item.data.scrapedAt ||
+                  existingData.scrapedAt ||
                   new Date(0).toISOString(),
               },
             }),
@@ -1114,49 +1214,35 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
         console.log("Using already-parsed result data");
       }
 
-      // Save bundle to DynamoDB with completed status
+      const bundle = reviewData || result;
+
+      // Save bundle to DynamoDB with completed status. A failed save throws
+      // so the caller's failure handling runs (keeps any previous bundle)
+      // instead of leaving the record stuck as pending.
       if (dynamoDocClient) {
-        try {
-          const jsonToUpload = reviewData || result;
-
-          await dynamoDocClient.send(
-            new PutCommand({
-              TableName: DYNAMODB_TABLE,
-              Item: {
-                profileId: profileId,
-                year: BUNDLE_YEAR,
-                status: "completed",
-                data: jsonToUpload,
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-              },
-            }),
-          );
-          console.log("Bundle saved to DynamoDB with completed status");
-          // Persist the freshly refreshed JWT so player search stays authed.
-          await storeUtrJwt(cacheDir);
-        } catch (dynamoError) {
-          console.error("Error saving bundle to DynamoDB:", dynamoError);
-          // Continue anyway - we still have the JSON data
-        }
-      }
-
-      // Ensure we have data to return
-      if (!reviewData) {
-        throw new Error(
-          "Failed to load review data - file not found and result not available",
+        const nowIso = new Date().toISOString();
+        await dynamoDocClient.send(
+          new PutCommand({
+            TableName: DYNAMODB_TABLE,
+            Item: {
+              profileId: profileId,
+              year: BUNDLE_YEAR,
+              status: "completed",
+              dataGz: packBundle(bundle),
+              createdAt: nowIso,
+              updatedAt: nowIso,
+            },
+          }),
         );
+        console.log("Bundle saved to DynamoDB with completed status");
+        // Persist the freshly refreshed JWT so player search stays authed.
+        await storeUtrJwt(cacheDir);
       }
 
-      // For async invocations, we don't need to return a response
-      // The data is already saved to DynamoDB, which is the goal
-      console.log(
-        "✅ Review data generated and saved to DynamoDB successfully",
-      );
       console.log(
         `✅ Data available for profileId: ${profileId}, year: ${year}`,
       );
-      return; // Just return - no response needed for async invocation
+      return bundle;
     } finally {
       process.chdir(originalCwd);
     }
@@ -1171,76 +1257,16 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
         ? "Scraper files not found. Please check Lambda package."
         : "Failed to generate review: " + error.message;
 
-    // For async invocations, we just log the error
-    // No need to return a response - the error is logged
     console.error("Error details:", errorMessage);
-
-    // Cleanup temp directories
-    // Use fs.rmSync with force for safe recursive deletion
+    throw error;
+  } finally {
+    // Remove the work dir (credentials file, browser profile, scrape output)
+    // on success too — warm containers otherwise fill /tmp run after run.
     try {
-      if (fs.existsSync(secretsPath)) {
-        try {
-          fs.unlinkSync(secretsPath);
-        } catch (e) {
-          /* ignore */
-        }
-      }
-      if (fs.existsSync(workDir)) {
-        try {
-          // Use fs.rmSync if available (Node.js 14.14+), otherwise use recursive delete
-          if (fs.rmSync) {
-            fs.rmSync(workDir, { recursive: true, force: true, maxRetries: 3 });
-          } else {
-            // Fallback: try to delete files individually, ignore errors
-            const deleteRecursive = (dir) => {
-              if (!fs.existsSync(dir)) return;
-              try {
-                const files = fs.readdirSync(dir);
-                for (const file of files) {
-                  const filePath = path.join(dir, file);
-                  try {
-                    const stat = fs.statSync(filePath);
-                    if (stat.isDirectory()) {
-                      deleteRecursive(filePath);
-                      try {
-                        fs.rmdirSync(filePath);
-                      } catch (e) {
-                        /* ignore */
-                      }
-                    } else {
-                      try {
-                        fs.unlinkSync(filePath);
-                      } catch (e) {
-                        /* ignore */
-                      }
-                    }
-                  } catch (e) {
-                    /* ignore */
-                  }
-                }
-                try {
-                  fs.rmdirSync(dir);
-                } catch (e) {
-                  /* ignore */
-                }
-              } catch (e) {
-                /* ignore */
-              }
-            };
-            deleteRecursive(workDir);
-          }
-        } catch (e) {
-          // Silently ignore - cleanup failures should not affect response
-          console.log("Cleanup warning (non-critical):", e.message);
-        }
-      }
+      fs.rmSync(workDir, { recursive: true, force: true, maxRetries: 3 });
     } catch (cleanupError) {
-      // Silently ignore - cleanup failures should not affect response
       console.log("Cleanup warning (non-critical):", cleanupError.message);
     }
-
-    // Re-throw the error so it's caught by the async handler
-    throw error;
   }
 }
 

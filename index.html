@@ -613,10 +613,33 @@
         return { matches: d?.matches || [], history: d?.history || [] };
     }
 
+    // Ratings in a bundle are as of its scrape; stats.js uses that to decide
+    // which matches can be compared on current UTRs.
+    function statsOpts(bundle) {
+        return { ratingsAsOf: bundle?.scrapedAt };
+    }
+
     function statsFor(windowSpec) {
         const { matches } = disciplineData();
         const filtered = UTRStats.filterMatches(matches, windowSpec, refNow());
-        return UTRStats.generateStats(filtered, state.discipline, state.bundle?.player?.name || "");
+        return UTRStats.generateStats(filtered, state.discipline, state.bundle?.player?.name || "", statsOpts(state.bundle));
+    }
+
+    // Footnote for rating-based stats: how many matches could be compared
+    // fairly, and whether on current UTRs rather than match-time ones.
+    function ratingNote(s) {
+        if (!s.matchesPlayed) return "";
+        if (!s.ratedMatches) return `<div class="stat-detail">No ratings from the time of these matches</div>`;
+        const parts = [];
+        if (s.ratedMatches < s.matchesPlayed) parts.push(`${s.ratedMatches} of ${s.matchesPlayed} matches`);
+        if (s.ratingBasis !== "matchTime") parts.push("by current UTR");
+        return parts.length ? `<div class="stat-detail">${parts.join(" · ")}</div>` : "";
+    }
+
+    // Label for the ratings shown on a best-win / worst-loss entry.
+    function ratingLabel(entry) {
+        const what = state.discipline === "doubles" ? "team avg" : "UTR";
+        return entry.ratingBasis === "matchTime" ? `${what} at the time` : `Current ${what}`;
     }
 
     function deltaChip(curPct, basePct, baseLabel) {
@@ -744,8 +767,8 @@
             <div class="stats-section">
                 <div class="section-title">Performance — ${WINDOW_LABELS[state.window]}</div>
                 <div class="stats-grid">
-                    <div class="stat-card"><div class="stat-label">vs Higher Rated</div><div class="stat-value">${wl(s.vsHigherRated.wins, s.vsHigherRated.losses)}</div></div>
-                    <div class="stat-card"><div class="stat-label">vs Lower Rated</div><div class="stat-value">${wl(s.vsLowerRated.wins, s.vsLowerRated.losses)}</div></div>
+                    <div class="stat-card"><div class="stat-label">vs Higher Rated</div><div class="stat-value">${wl(s.vsHigherRated.wins, s.vsHigherRated.losses)}</div>${ratingNote(s)}</div>
+                    <div class="stat-card"><div class="stat-label">vs Lower Rated</div><div class="stat-value">${wl(s.vsLowerRated.wins, s.vsLowerRated.losses)}</div>${ratingNote(s)}</div>
                     <div class="stat-card"><div class="stat-label">🎯 Tiebreaks (7-6)</div><div class="stat-value">${wl(s.tiebreaks.won, s.tiebreaks.lost)}</div></div>
                     <div class="stat-card"><div class="stat-label">⚡ Super Tiebreaks</div><div class="stat-value">${wl(s.superTiebreaks.won, s.superTiebreaks.lost)}</div></div>
                     <div class="stat-card"><div class="stat-label">💪 After Winning 1st Set</div><div class="stat-value">${wl(s.firstSet.afterWinning.wins, s.firstSet.afterWinning.losses)}</div></div>
@@ -833,12 +856,12 @@
     function renderTrends(container) {
         const { matches, history } = disciplineData();
         const player = state.bundle?.player?.name || "";
-        const seasons = UTRStats.seasonSummaries(matches, history, state.discipline, player).reverse();
+        const seasons = UTRStats.seasonSummaries(matches, history, state.discipline, player, statsOpts(state.bundle)).reverse();
         const rAll = UTRStats.ratingStats(history, "all");
         const chart = utrChartSvg(history);
 
         // Monthly activity, last 12 months
-        const allStats = UTRStats.generateStats(matches, state.discipline, player);
+        const allStats = UTRStats.generateStats(matches, state.discipline, player, statsOpts(state.bundle));
         const months = allStats.monthlyBreakdown.slice(-12);
         const maxTotal = Math.max(1, ...months.map((m) => m.total));
 
@@ -1050,8 +1073,8 @@
             </div>
 
             <div class="callouts-grid" style="grid-template-columns:repeat(2, 1fr)">
-                ${s.bestWin ? callout("dominated", "🏆", "Best Win", s.bestWin.opponent, `Score: <span class="highlight">${esc(s.bestWin.score)}</span><br>${state.discipline === "doubles" ? "Team avg" : "UTR"} ${s.bestWin.myUtr.toFixed(2)} vs ${s.bestWin.opponentUtr.toFixed(2)} <span style="color:var(--win)">(${signed(s.bestWin.utrDiff)})</span>${s.bestWin.partner ? `<br>w/ ${esc(s.bestWin.partner)}` : ""}`) : emptyCallout("🏆", "Best Win")}
-                ${s.worstLoss ? callout("nemesis", "😔", "Worst Loss", s.worstLoss.opponent, `Score: <span class="highlight">${esc(s.worstLoss.score)}</span><br>${state.discipline === "doubles" ? "Team avg" : "UTR"} ${s.worstLoss.myUtr.toFixed(2)} vs ${s.worstLoss.opponentUtr.toFixed(2)} <span style="color:var(--loss)">(${signed(s.worstLoss.utrDiff)})</span>${s.worstLoss.partner ? `<br>w/ ${esc(s.worstLoss.partner)}` : ""}`) : emptyCallout("😔", "Worst Loss")}
+                ${s.bestWin ? callout("dominated", "🏆", "Best Win", s.bestWin.opponent, `Score: <span class="highlight">${esc(s.bestWin.score)}</span><br>${ratingLabel(s.bestWin)} ${s.bestWin.myUtr.toFixed(2)} vs ${s.bestWin.opponentUtr.toFixed(2)} <span style="color:var(--win)">(${signed(s.bestWin.utrDiff)})</span>${s.bestWin.partner ? `<br>w/ ${esc(s.bestWin.partner)}` : ""}`) : emptyCallout("🏆", "Best Win")}
+                ${s.worstLoss ? callout("nemesis", "😔", "Worst Loss", s.worstLoss.opponent, `Score: <span class="highlight">${esc(s.worstLoss.score)}</span><br>${ratingLabel(s.worstLoss)} ${s.worstLoss.myUtr.toFixed(2)} vs ${s.worstLoss.opponentUtr.toFixed(2)} <span style="color:var(--loss)">(${signed(s.worstLoss.utrDiff)})</span>${s.worstLoss.partner ? `<br>w/ ${esc(s.worstLoss.partner)}` : ""}`) : emptyCallout("😔", "Worst Loss")}
             </div>
 
             ${state.discipline === "doubles" && s.mostFrequentPartner ? `
@@ -1071,8 +1094,8 @@
             <div class="stats-section">
                 <div class="section-title">Performance</div>
                 <div class="stats-grid">
-                    <div class="stat-card"><div class="stat-label">vs Higher Rated</div><div class="stat-value">${wl(s.vsHigherRated.wins, s.vsHigherRated.losses)}</div></div>
-                    <div class="stat-card"><div class="stat-label">vs Lower Rated</div><div class="stat-value">${wl(s.vsLowerRated.wins, s.vsLowerRated.losses)}</div></div>
+                    <div class="stat-card"><div class="stat-label">vs Higher Rated</div><div class="stat-value">${wl(s.vsHigherRated.wins, s.vsHigherRated.losses)}</div>${ratingNote(s)}</div>
+                    <div class="stat-card"><div class="stat-label">vs Lower Rated</div><div class="stat-value">${wl(s.vsLowerRated.wins, s.vsLowerRated.losses)}</div>${ratingNote(s)}</div>
                     <div class="stat-card"><div class="stat-label">🎯 Tiebreaks (7-6)</div><div class="stat-value">${wl(s.tiebreaks.won, s.tiebreaks.lost)}</div></div>
                     <div class="stat-card"><div class="stat-label">⚡ Super Tiebreaks</div><div class="stat-value">${wl(s.superTiebreaks.won, s.superTiebreaks.lost)}</div></div>
                     <div class="stat-card"><div class="stat-label">📊 Sets Record</div><div class="stat-value">${wl(s.setsRecord.won, s.setsRecord.lost)}</div></div>
@@ -1286,9 +1309,9 @@
         const periodLabel = h.window === "all" ? "All Time" : h.window;
 
         const meetings = meetingsIn(d);
-        const hs = UTRStats.generateStats(meetings, d, nameA);
+        const hs = UTRStats.generateStats(meetings, d, nameA, statsOpts(A));
         const inPeriod = h.window === "all" ? null
-            : UTRStats.generateStats(UTRStats.filterMatches(meetings, spec), d, nameA);
+            : UTRStats.generateStats(UTRStats.filterMatches(meetings, spec), d, nameA, statsOpts(A));
         const otherCount = meetingsIn(other).filter((m) => !m.isWalkover).length;
         const partnered = d === "doubles"
             ? (A.doubles?.matches || []).filter((m) => !m.isWalkover && (m.won === true || m.won === false) &&
@@ -1296,8 +1319,8 @@
             : [];
         const partneredWins = partnered.filter((m) => m.won).length;
 
-        const sA = UTRStats.generateStats(UTRStats.filterMatches(A[d]?.matches || [], spec), d, nameA);
-        const sB = UTRStats.generateStats(UTRStats.filterMatches(B[d]?.matches || [], spec), d, nameB);
+        const sA = UTRStats.generateStats(UTRStats.filterMatches(A[d]?.matches || [], spec), d, nameA, statsOpts(A));
+        const sB = UTRStats.generateStats(UTRStats.filterMatches(B[d]?.matches || [], spec), d, nameB, statsOpts(B));
         const rA = UTRStats.ratingStats(A[d]?.history, spec);
         const rB = UTRStats.ratingStats(B[d]?.history, spec);
 
@@ -1447,7 +1470,7 @@
     // ------------------------------------------------------------------
     // Data loading (Lambda API + polling)
     // ------------------------------------------------------------------
-    function setBundle(data, stale) {
+    function setBundle(data, stale, refreshing) {
         if (!data || data.schemaVersion !== 2) {
             showError("Received data in an unexpected format. Try refreshing in a minute.");
             return;
@@ -1464,6 +1487,9 @@
         if (stale) {
             const el = document.getElementById("data-freshness");
             if (el) el.textContent += " · refresh failed, showing previous data";
+        } else if (refreshing) {
+            const el = document.getElementById("data-freshness");
+            if (el) el.textContent += " · updating now, reload in a couple of minutes for the latest";
         }
     }
 
@@ -1561,7 +1587,7 @@
         showProcessingOverlay(profileId);
         try {
             const result = await fetchBundle(profileId, updateProcessingMessage);
-            setBundle(result.data, result.stale);
+            setBundle(result.data, result.stale, result.refreshing);
         } catch (error) {
             showError(error.message);
         }
