@@ -1598,11 +1598,13 @@
             console.error("Error fetching data:", error);
             onProgress("⏳ Working on it...<br><span style='font-size:1rem;'>Checking status...</span>");
         }
+        // A not-ready reply says to check back; anything else unsuccessful is
+        // a real failure (e.g. a retry backoff) and polling won't change it.
+        const stillWorking = (result) => /check back|processed/.test(result.message || "");
         if (response && response.ok) {
             const result = await response.json();
             if (result.success && result.data) return result;
-            const msg = result.message || "";
-            if (!msg.includes("check back") && !msg.includes("processed")) {
+            if (!stillWorking(result)) {
                 throw new Error(result.error || result.message || "Unknown error");
             }
         } else if (response && response.status === 504) {
@@ -1615,17 +1617,20 @@
         const maxAttempts = 60; // up to 5 minutes (weekly refresh can be slow)
         await sleep(3000);
         for (let attempt = 1; ; attempt++) {
+            let failure = null;
             try {
                 const res = await requestBundle(profileId);
                 if (res.ok) {
                     const result = await res.json();
                     if (result.success && result.data) return result;
+                    if (!stillWorking(result)) failure = result.error || result.message || "Unknown error";
                 }
             } catch (e) {
                 if (attempt >= maxAttempts) throw new Error("Failed to fetch data. Please refresh the page to try again.");
                 await sleep(5000);
                 continue;
             }
+            if (failure) throw new Error(failure);
             if (attempt >= maxAttempts) throw new Error("Request timed out. Please refresh the page to try again.");
             onProgress(`Still working... (${attempt * 5}s elapsed)<br><span style="font-size:1rem;">Scraping fresh data from UTR</span>`);
             await sleep(5000);

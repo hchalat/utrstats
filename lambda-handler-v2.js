@@ -60,7 +60,25 @@ const MAX_DATA_AGE_DAYS = 7;
 const PENDING_TIMEOUT_MINUTES = 15;
 // After a failed refresh, serve the stale bundle (flagged stale) for this long
 // before trying another scrape.
+// The wait doubles with each consecutive failure (failureCount, reset by a
+// successful save) up to the cap, so a broken scraper — e.g. after a UTR
+// site change — doesn't keep logging in and scraping on every visit.
 const RETRY_BACKOFF_MINUTES = 60;
+const MAX_RETRY_BACKOFF_MINUTES = 24 * 60;
+
+function retryBackoffMs(failureCount) {
+  const n = Math.max(1, failureCount || 1);
+  return (
+    Math.min(RETRY_BACKOFF_MINUTES * 2 ** (n - 1), MAX_RETRY_BACKOFF_MINUTES) *
+    60 * 1000
+  );
+}
+
+// True while a record's last failed attempt is still inside its backoff.
+function inRetryBackoff(item) {
+  const lastAttempt = new Date(item.lastAttemptAt || 0).getTime();
+  return Date.now() - lastAttempt < retryBackoffMs(item.failureCount);
+}
 // DynamoDB caps an item at 400 KB; an uncompressed bundle passes that at
 // roughly 700-800 matches, so bundles are stored gzipped (`dataGz`).
 const MAX_BUNDLE_BYTES = 380 * 1024;
@@ -449,11 +467,12 @@ const mainHandler = async (event) => {
             TableName: DYNAMODB_TABLE,
             Key: { profileId, year: BUNDLE_YEAR },
             UpdateExpression:
-              "SET lastError = :err, lastAttemptAt = :now REMOVE refreshStartedAt",
+              "SET lastError = :err, lastAttemptAt = :now REMOVE refreshStartedAt ADD failureCount :one",
             ConditionExpression: "attribute_exists(profileId)",
             ExpressionAttributeValues: {
               ":err": error.message,
               ":now": new Date().toISOString(),
+              ":one": 1,
             },
           }),
         );
@@ -613,8 +632,7 @@ const mainHandler = async (event) => {
               data: cachedData,
             });
           }
-          const lastAttempt = new Date(item.lastAttemptAt || 0).getTime();
-          if (Date.now() - lastAttempt < RETRY_BACKOFF_MINUTES * 60 * 1000) {
+          if (inRetryBackoff(item)) {
             console.log("Bundle is stale but a refresh failed recently");
             return corsResponse(200, {
               success: true,
@@ -661,6 +679,20 @@ const mainHandler = async (event) => {
             "Pending record timed out (scrape likely died) - retrying",
           );
         } else if (item.status === "failed") {
+          // No bundle to fall back on (never loaded, or no matches found):
+          // without a backoff every visit — and every poll — would re-scrape.
+          if (inRetryBackoff(item)) {
+            const lastAttempt = new Date(item.lastAttemptAt || 0).getTime();
+            const minutesLeft = Math.ceil(
+              (lastAttempt + retryBackoffMs(item.failureCount) - Date.now()) /
+                60000,
+            );
+            console.log(`Previous attempt failed; retry in ${minutesLeft} min`);
+            return corsResponse(200, {
+              success: false,
+              error: `We couldn't load this profile on the last attempt. It will be retried in about ${minutesLeft >= 90 ? `${Math.round(minutesLeft / 60)} hours` : `${minutesLeft} minutes`}.`,
+            });
+          }
           console.log("Previous attempt failed, will retry");
         }
       }
@@ -759,12 +791,13 @@ const mainHandler = async (event) => {
               Key: { profileId, year },
               // The claim overwrote updatedAt; put the bundle's real age back.
               UpdateExpression:
-                "SET #s = :completed, lastError = :err, lastAttemptAt = :now, updatedAt = :dataAt",
+                "SET #s = :completed, lastError = :err, lastAttemptAt = :now, updatedAt = :dataAt ADD failureCount :one",
               ExpressionAttributeNames: { "#s": "status" },
               ExpressionAttributeValues: {
                 ":completed": "completed",
                 ":err": scrapeError.message,
                 ":now": new Date().toISOString(),
+                ":one": 1,
                 ":dataAt":
                   staleUpdatedAt ||
                   existingData.scrapedAt ||
@@ -782,6 +815,8 @@ const mainHandler = async (event) => {
                 year,
                 status: "failed",
                 error: scrapeError.message,
+                failureCount: (existing.Item?.failureCount || 0) + 1,
+                lastAttemptAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
               },
             }),
