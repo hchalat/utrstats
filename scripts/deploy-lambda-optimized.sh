@@ -33,6 +33,7 @@ zip -r "$ZIP_FILE" \
     lambda-handler-v2.js \
     generate-full-review.js \
     scraper-full.js \
+    scraper-http.js \
     lib/ \
     -x "*.git*" "*.DS_Store" "*.md" "*.sh" "*.png" "cache/*" \
     2>/dev/null
@@ -43,6 +44,14 @@ if ! unzip -l "$ZIP_FILE" | grep -q "lib/stats.js"; then
     exit 1
 fi
 echo "✅ Verified lib/ is included in package"
+
+# The HTTP scraper is optional at runtime (the browser scraper covers for
+# it), so a missing copy would only show up as slower refreshes — check here.
+if ! unzip -l "$ZIP_FILE" | grep -q "scraper-http.js" || ! unzip -l "$ZIP_FILE" | grep -q "lib/utr-api.js"; then
+    echo "❌ scraper-http.js or lib/utr-api.js missing from package — aborting"
+    exit 1
+fi
+echo "✅ Verified the HTTP scraper is included in package"
 
 # Add optional files if they exist
 [ -f "parse-complete.js" ] && zip "$ZIP_FILE" parse-complete.js 2>/dev/null

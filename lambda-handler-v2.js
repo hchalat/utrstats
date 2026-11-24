@@ -907,6 +907,7 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
 
     // Reference scraper files
     const scraperPath = path.join(TASK_DIR, "scraper-full.js");
+    const httpScraperPath = path.join(TASK_DIR, "scraper-http.js");
     const generatorPath = path.join(TASK_DIR, "generate-full-review.js");
 
     // Check if files exist
@@ -928,71 +929,55 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
     process.chdir(workDir);
 
     try {
-      // Run scraper
-      console.log("Running scraper...");
-      console.log("Secrets file path:", secretsPath);
-      console.log("Secrets file exists:", fs.existsSync(secretsPath));
-      console.log("Scraper path:", scraperPath);
-      console.log("Scraper path exists:", fs.existsSync(scraperPath));
-      console.log("Profile ID:", profileId);
-      let scraperOutput;
-      try {
-        // Pass SECRETS_PATH as environment variable so scraper can find it
-        const scraperEnv = {
-          ...process.env,
-          CACHE_DIR: cacheDir,
-          SECRETS_PATH: secretsPath,
-          OUTPUT_DIR: workDir, // Tell scraper where to write output
-          UTR_JWT: sessionJwt || "",
-          PREVIOUS_BUNDLE: previousBundlePath,
-          // Also set CHROMIUM_PATH if available
-          CHROMIUM_PATH: process.env.CHROMIUM_PATH || "/opt/chromium",
-        };
-        console.log(
-          "Scraper environment:",
-          JSON.stringify({
-            CACHE_DIR: scraperEnv.CACHE_DIR,
-            SECRETS_PATH: scraperEnv.SECRETS_PATH,
-            CHROMIUM_PATH: scraperEnv.CHROMIUM_PATH,
-          }),
-        );
-
-        console.log("About to execute scraper command...");
-        // --fast: skips per-opponent rating histories but DOES fetch the
-        // player's own rating history, which the year-round site needs for
-        // the UTR journey chart and match-time ratings.
-        const scraperCommand = `node ${scraperPath} ${profileId} --fast`;
-        console.log("Command:", scraperCommand);
-        console.log("Working directory:", workDir);
-
-        scraperOutput = await execAsync(scraperCommand, {
-          timeout: 240000, // 4 minutes (fast mode ~45-90s)
+      // Run a scraper. With a valid stored token, the HTTP scraper fetches
+      // everything from UTR's JSON API with no browser (a few seconds, a few
+      // calls). Without one, or if it fails, the browser scraper runs: it
+      // logs in when needed and its fresh token is stored for next time.
+      // --fast: skips per-opponent rating histories but DOES fetch the
+      // player's own rating history (UTR journey chart, match-time ratings).
+      const scraperEnv = {
+        ...process.env,
+        CACHE_DIR: cacheDir,
+        SECRETS_PATH: secretsPath,
+        OUTPUT_DIR: workDir,
+        UTR_JWT: sessionJwt || "",
+        PREVIOUS_BUNDLE: previousBundlePath,
+        CHROMIUM_PATH: process.env.CHROMIUM_PATH || "/opt/chromium",
+      };
+      const runScraper = async (label, command, timeout) => {
+        console.log(`Running ${label} scraper: ${command}`);
+        const out = await execAsync(command, {
+          timeout,
           maxBuffer: 10 * 1024 * 1024,
           env: scraperEnv,
-          cwd: workDir, // Run from work directory so relative paths work
+          cwd: workDir,
         });
-        console.log(
-          "Scraper command completed. stdout length:",
-          scraperOutput.stdout?.length || 0,
-        );
-        console.log(
-          "Scraper stdout (first 3000 chars):",
-          scraperOutput.stdout.substring(0, 3000),
-        );
-        if (scraperOutput.stderr) {
-          console.log(
-            "Scraper stderr:",
-            scraperOutput.stderr.substring(0, 2000),
+        console.log(`${label} scraper stdout (first 3000 chars):`, out.stdout.substring(0, 3000));
+        if (out.stderr) console.log(`${label} scraper stderr:`, out.stderr.substring(0, 2000));
+      };
+
+      let scraped = false;
+      if (sessionJwt && fs.existsSync(httpScraperPath)) {
+        try {
+          await runScraper("HTTP", `node ${httpScraperPath} ${profileId}`, 120000);
+          scraped = true;
+        } catch (httpError) {
+          console.error(
+            `HTTP scraper failed (exit ${httpError.code}); falling back to the browser scraper.`,
+            (httpError.stdout || "").slice(-1500),
+            (httpError.stderr || "").slice(-1500),
           );
         }
-
-      } catch (scraperError) {
-        console.error("Scraper error:", scraperError);
-        console.error("Scraper stdout:", scraperError.stdout || "");
-        console.error("Scraper stderr:", scraperError.stderr || "");
-        throw new Error(
-          `Scraper failed: ${scraperError.message}. stdout: ${scraperError.stdout || ""}. stderr: ${scraperError.stderr || ""}`,
-        );
+      }
+      if (!scraped) {
+        try {
+          await runScraper("browser", `node ${scraperPath} ${profileId} --fast`, 240000);
+        } catch (scraperError) {
+          console.error("Scraper error:", scraperError);
+          throw new Error(
+            `Scraper failed: ${scraperError.message}. stdout: ${scraperError.stdout || ""}. stderr: ${scraperError.stderr || ""}`,
+          );
+        }
       }
 
       // Run generator
