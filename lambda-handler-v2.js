@@ -260,30 +260,33 @@ function extractIP(event) {
 // with a non-numeric profileId so it never collides with a real player.
 const SESSION_KEY = { profileId: "_session", year: BUNDLE_YEAR };
 
-// True if the JWT parses and has more than a minute left before expiry.
-function isValid(jwt) {
+// True if the JWT parses and has more than `minRemainingMs` left before expiry.
+function isValid(jwt, minRemainingMs = 60000) {
   if (!jwt || typeof jwt !== "string") return false;
   try {
     const payload = JSON.parse(
       Buffer.from(jwt.split(".")[1], "base64").toString(),
     );
-    return payload.exp && payload.exp * 1000 > Date.now() + 60000;
+    return payload.exp && payload.exp * 1000 > Date.now() + minRemainingMs;
   } catch (e) {
     return false;
   }
 }
 
+// A token handed to the scraper must outlast the scrape itself.
+const SCRAPE_JWT_MIN_REMAINING_MS = 15 * 60 * 1000;
+
 // Read a valid (unexpired) UTR JWT for authenticated API calls like search.
 // Prefers the token refreshed by the most recent scrape (DynamoDB), and
 // falls back to the one bundled with the deploy package.
-async function getUtrJwt() {
+async function getUtrJwt(minRemainingMs) {
   // 1. DynamoDB session slot (freshest — updated by each scrape).
   if (dynamoDocClient) {
     try {
       const r = await dynamoDocClient.send(
         new GetCommand({ TableName: DYNAMODB_TABLE, Key: SESSION_KEY }),
       );
-      if (isValid(r.Item?.jwt)) return r.Item.jwt;
+      if (isValid(r.Item?.jwt, minRemainingMs)) return r.Item.jwt;
     } catch (e) {
       console.error("Error reading session jwt:", e.message);
     }
@@ -295,7 +298,7 @@ async function getUtrJwt() {
     if (fs.existsSync(bundled)) {
       const auth = JSON.parse(fs.readFileSync(bundled, "utf8"));
       const jwt = (auth.cookies || []).find((c) => c.name === "jwt")?.value;
-      if (isValid(jwt)) return jwt;
+      if (isValid(jwt, minRemainingMs)) return jwt;
     }
   } catch (e) {
     console.error("Error reading bundled jwt:", e.message);
@@ -1016,6 +1019,32 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
     };
     fs.writeFileSync(secretsPath, JSON.stringify(credentials, null, 2));
 
+    // Keep UTR traffic low: hand the scraper the stored session (so it can
+    // usually skip the login flow) and the previous bundle (so it only
+    // re-fetches recent results and merges them in).
+    const sessionJwt = await getUtrJwt(SCRAPE_JWT_MIN_REMAINING_MS);
+    let previousBundlePath = "";
+    if (dynamoDocClient) {
+      try {
+        const prev = await dynamoDocClient.send(
+          new GetCommand({
+            TableName: DYNAMODB_TABLE,
+            Key: { profileId, year: BUNDLE_YEAR },
+          }),
+        );
+        const previousBundle = unpackBundle(prev.Item);
+        if (previousBundle) {
+          previousBundlePath = path.join(workDir, "previous-bundle.json");
+          fs.writeFileSync(previousBundlePath, JSON.stringify(previousBundle));
+        }
+      } catch (e) {
+        console.error("Could not load previous bundle:", e.message);
+      }
+    }
+    console.log(
+      `Session token: ${sessionJwt ? "reusing stored" : "none"}; previous bundle: ${previousBundlePath ? "yes" : "no"}`,
+    );
+
     // Reference scraper files
     const scraperPath = path.join(TASK_DIR, "scraper-full.js");
     const generatorPath = path.join(TASK_DIR, "generate-full-review.js");
@@ -1069,6 +1098,8 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
           CACHE_DIR: cacheDir,
           SECRETS_PATH: secretsPath,
           OUTPUT_DIR: workDir, // Tell scraper where to write output
+          UTR_JWT: sessionJwt || "",
+          PREVIOUS_BUNDLE: previousBundlePath,
           // Also set CHROMIUM_PATH if available
           CHROMIUM_PATH: process.env.CHROMIUM_PATH || "/opt/chromium",
         };

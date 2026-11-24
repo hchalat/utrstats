@@ -90,6 +90,9 @@ const bundle = {
   schemaVersion: SCHEMA_VERSION,
   profileId: PROFILE_ID,
   scrapedAt: fullData.scrapedAt,
+  // When the full career was last fetched; later refreshes fetch only the
+  // last 12 months and merge (see scraper-full.js).
+  resultsFullAt: fullData.resultsFullAt || null,
   generatedAt: new Date().toISOString(),
   player: fullData.player || { name: "Unknown", id: PROFILE_ID },
   singles: {

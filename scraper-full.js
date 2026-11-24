@@ -10,7 +10,7 @@ const {
   inferYears,
   attachRatingDeltas,
 } = require("./lib/match-parser");
-const { parseApiResults } = require("./lib/api-parser");
+const { parseApiResults, mergeMatches } = require("./lib/api-parser");
 
 // Use @sparticuz/chromium for Lambda (actively maintained, includes all dependencies)
 // This is the recommended package for AWS Lambda
@@ -50,6 +50,39 @@ const DELAY_BETWEEN_OPPONENTS = 300; // 300ms base delay for opponent lookups (w
 const MAX_OPPONENTS_TO_FETCH = 15; // Limit opponent lookups
 const MAX_PARALLEL_OPPONENTS = 4; // Fetch up to 4 opponents concurrently
 const ENABLE_RESOURCE_BLOCKING = true; // Block images/fonts/CSS to speed up loading
+// A refresh normally re-fetches only the last 12 months of results and
+// merges them into the previous bundle (PREVIOUS_BUNDLE); the full career is
+// re-walked once the last full walk is older than this, which picks up late
+// edits and deletions to older results.
+const FULL_RESULTS_MAX_AGE_DAYS = 60;
+
+// The previous bundle, if it can seed an incremental results fetch: every
+// match must come from the API (merging keys on resultId) and its last full
+// walk must be recent enough that the 12-month fetch overlaps it.
+function loadPreviousBundle() {
+  const p = process.env.PREVIOUS_BUNDLE;
+  if (!p || !fs.existsSync(p)) return null;
+  try {
+    const bundle = JSON.parse(fs.readFileSync(p, "utf8"));
+    const all = [
+      ...(bundle.singles?.matches || []),
+      ...(bundle.doubles?.matches || []),
+    ];
+    const fullAgeDays =
+      (Date.now() - new Date(bundle.resultsFullAt || 0).getTime()) / 86400000;
+    if (
+      bundle.schemaVersion !== 2 ||
+      fullAgeDays > FULL_RESULTS_MAX_AGE_DAYS ||
+      all.some((m) => m.source !== "api" || m.resultId == null)
+    ) {
+      return null;
+    }
+    return bundle;
+  } catch (e) {
+    console.log(`⚠️  Could not read previous bundle: ${e.message}`);
+    return null;
+  }
+}
 
 // Add random jitter to delays to appear more human-like
 function randomDelay(baseMs, jitterMs = 200) {
@@ -495,6 +528,30 @@ async function scrapeUTR(profileId) {
       }
     } catch (e) {
       console.log(`   ⚠️  Could not load auth state: ${e.message}`);
+    }
+  }
+
+  // A session token from the Lambda (refreshed by earlier runs) is fresher
+  // than the deploy-time cookies and usually makes the login flow — the
+  // most conspicuous thing a scrape does — unnecessary.
+  if (process.env.UTR_JWT) {
+    try {
+      if (!authStatePath) {
+        await page.goto(`${BASE_URL}`, {
+          waitUntil: "domcontentloaded",
+          timeout: 30000,
+        });
+      }
+      await page.setCookie({
+        name: "jwt",
+        value: process.env.UTR_JWT,
+        domain: ".utrsports.net",
+        path: "/",
+        secure: true,
+      });
+      console.log("   ✅ Using stored session token");
+    } catch (e) {
+      console.log(`   ⚠️  Could not set session token: ${e.message}`);
     }
   }
 
@@ -1251,7 +1308,15 @@ async function scrapeUTR(profileId) {
     let apiMatchesLoaded = false;
     try {
       const apiStart = Date.now();
-      const apiData = await fetchApiData(page, profileId);
+      const previous = loadPreviousBundle();
+      console.log(
+        previous
+          ? `\n📡 Fetching results from the last 12 months (full walk ${previous.resultsFullAt})`
+          : "\n📡 Fetching full career results",
+      );
+      const apiData = await fetchApiData(page, profileId, {
+        incremental: !!previous,
+      });
       if (apiData?.profile) {
         const p = apiData.profile;
         results.player = {
@@ -1267,16 +1332,36 @@ async function scrapeUTR(profileId) {
         if (apiData.results._v4Counts) {
           console.log(`   v4 events per call: ${apiData.results._v4Counts}`);
         }
-        const parsed = parseApiResults(apiData.results, profileId);
+        let parsed = parseApiResults(apiData.results, profileId);
+        const fetchedCount =
+          parsed.singlesMatches.length + parsed.doublesMatches.length;
+        if (previous) {
+          parsed = {
+            singlesMatches: mergeMatches(
+              previous.singles?.matches,
+              parsed.singlesMatches,
+            ),
+            doublesMatches: mergeMatches(
+              previous.doubles?.matches,
+              parsed.doublesMatches,
+            ),
+          };
+        }
         if (parsed.singlesMatches.length + parsed.doublesMatches.length > 0) {
           results.singlesMatches = parsed.singlesMatches;
           results.doublesMatches = parsed.doublesMatches;
           results.dataSource = "api";
+          results.resultsFullAt = previous
+            ? previous.resultsFullAt
+            : results.scrapedAt;
           apiMatchesLoaded = true;
           console.log(
             `✅ API results: ${parsed.singlesMatches.length} singles, ` +
-              `${parsed.doublesMatches.length} doubles (full career) in ` +
-              `${((Date.now() - apiStart) / 1000).toFixed(2)}s`,
+              `${parsed.doublesMatches.length} doubles ` +
+              (previous
+                ? `(${fetchedCount} fetched from the last 12 months, merged)`
+                : "(full career)") +
+              ` in ${((Date.now() - apiStart) / 1000).toFixed(2)}s`,
           );
         }
       }
@@ -1921,9 +2006,10 @@ async function scrollToBottom(page) {
 
 // Fetch structured data from UTR's JSON API using the page's authenticated
 // session. Must be called with the page on the app.utrsports.net origin so
-// cookies apply. The results endpoint returns the player's full career.
-async function fetchApiData(page, profileId) {
-  return await page.evaluate(async (id) => {
+// cookies apply. incremental: fetch only the last 12 months (the caller
+// merges them into the previous bundle) instead of walking every year.
+async function fetchApiData(page, profileId, { incremental = false } = {}) {
+  return await page.evaluate(async (id, incremental) => {
     const get = async (url) => {
       const r = await fetch(url, {
         credentials: "include",
@@ -1935,13 +2021,26 @@ async function fetchApiData(page, profileId) {
     // UTR's web app moved to v4 (Nov 2026; v1 now 404s). v4 returns one
     // year per call (default: the last 12 months), keyed by type=s|d and
     // year=YYYY|last, so walk back year by year and merge the events —
-    // parseApiResults dedupes by result id.
+    // parseApiResults dedupes by result id. Calls are sequential with a
+    // human-ish pause between them to keep the load on UTR gentle.
     let results;
     try {
-      const v4 = (q) =>
-        get(`https://api.utrsports.net/v4/player/${id}/results?${q}`).catch(
-          () => null,
-        );
+      let calls = 0;
+      let okCalls = 0;
+      const v4 = async (q) => {
+        if (calls++) {
+          await new Promise((r) => setTimeout(r, 500 + Math.random() * 500));
+        }
+        try {
+          const body = await get(
+            `https://api.utrsports.net/v4/player/${id}/results?${q}`,
+          );
+          okCalls++;
+          return body;
+        } catch (e) {
+          return null;
+        }
+      };
       const events = [];
       const counts = [];
       const add = (body, label) => {
@@ -1952,13 +2051,18 @@ async function fetchApiData(page, profileId) {
       };
       for (const type of ["s", "d"]) {
         add(await v4(`type=${type}&year=last`), `${type}/last`);
+        if (incremental) continue;
         let emptyStreak = 0;
         for (let y = new Date().getFullYear(); y >= 2005 && emptyStreak < 3; y--) {
           const n = add(await v4(`type=${type}&year=${y}`), `${type}/${y}`);
           emptyStreak = n ? 0 : emptyStreak + 1;
         }
       }
-      if (events.length === 0) throw new Error("v4 returned no events");
+      // No events is legitimate for an incremental fetch (nothing played in
+      // the last 12 months); only fall back when v4 itself failed.
+      if (okCalls === 0 || (!incremental && events.length === 0)) {
+        throw new Error("v4 returned no events");
+      }
       results = { events, _v4Counts: counts.join(" ") };
     } catch (e) {
       results = await get(`https://api.utrsports.net/v1/player/${id}/results`);
@@ -1970,7 +2074,7 @@ async function fetchApiData(page, profileId) {
       // Profile endpoint is optional; results are what matter.
     }
     return { results, profile };
-  }, profileId);
+  }, profileId, incremental);
 }
 
 async function scrapeMatches(page, playerName, type) {
