@@ -808,6 +808,11 @@
         }
         const last = pts[pts.length - 1];
         const peak = pts.reduce((a, b) => (b.rating > a.rating ? b : a));
+        // Current rating is the peak: merge into one label instead of stacking two
+        const atPeak = last.rating.toFixed(2) === peak.rating.toFixed(2);
+        // Peak is a different value but sits next to the current label: drop it below its dot
+        const peakNearLast = !atPeak && Math.abs(x(peak.date) - x(last.date)) < 90 && Math.abs(y(peak.rating) - y(last.rating)) < 22;
+        const peakLabelY = peakNearLast ? y(peak.rating) + 18 : y(peak.rating) - 8;
 
         return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="UTR rating history">
             <defs><linearGradient id="utrfill" x1="0" y1="0" x2="0" y2="1">
@@ -818,10 +823,10 @@
             <text x="${PX - 8}" y="${y(rMin + pad) + 4}" fill="rgba(255,255,255,0.4)" font-size="11" text-anchor="end" font-family="Outfit">${(rMin + pad).toFixed(1)}</text>
             <path d="${area}" fill="url(#utrfill)"/>
             <path d="${line}" fill="none" stroke="#a78bfa" stroke-width="2.5" stroke-linejoin="round"/>
-            <circle cx="${x(peak.date)}" cy="${y(peak.rating)}" r="4" fill="#ccff00"/>
-            <text x="${Math.min(x(peak.date) + 8, W - 70)}" y="${y(peak.rating) - 8}" fill="#ccff00" font-size="12" font-weight="700" font-family="Outfit">peak ${peak.rating.toFixed(2)}</text>
-            <circle cx="${x(last.date)}" cy="${y(last.rating)}" r="4.5" fill="#fff"/>
-            <text x="${x(last.date) - 8}" y="${y(last.rating) - 10}" fill="#fff" font-size="13" font-weight="700" text-anchor="end" font-family="Outfit">${last.rating.toFixed(2)}</text>
+            ${atPeak ? "" : `<circle cx="${x(peak.date)}" cy="${y(peak.rating)}" r="4" fill="#ccff00"/>
+            <text x="${Math.min(x(peak.date) + 8, W - 70)}" y="${peakLabelY}" fill="#ccff00" font-size="12" font-weight="700" font-family="Outfit">peak ${peak.rating.toFixed(2)}</text>`}
+            <circle cx="${x(last.date)}" cy="${y(last.rating)}" r="4.5" fill="#fff"${atPeak ? ` stroke="#ccff00" stroke-width="2"` : ""}/>
+            <text x="${x(last.date) - 8}" y="${y(last.rating) - 10}" fill="#fff" font-size="13" font-weight="700" text-anchor="end" font-family="Outfit">${atPeak ? `<tspan fill="#ccff00" font-size="12">peak </tspan>` : ""}${last.rating.toFixed(2)}</text>
         </svg>`;
     }
 
