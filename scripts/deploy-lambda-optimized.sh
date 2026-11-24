@@ -26,13 +26,23 @@ if [ -f "cache/auth-state.json" ]; then
   echo "✅ Copied auth-state.json for Lambda deployment"
 fi
 
-# Create zip with ONLY code files (no node_modules)
+# Create zip with ONLY code files (no node_modules).
+# lib/ holds the shared parser + stats modules that scraper-full.js and
+# generate-full-review.js require — the function breaks without it.
 zip -r "$ZIP_FILE" \
     lambda-handler-v2.js \
     generate-full-review.js \
     scraper-full.js \
+    lib/ \
     -x "*.git*" "*.DS_Store" "*.md" "*.sh" "*.png" "cache/*" \
     2>/dev/null
+
+# Verify lib/ made it into the package (guards against silent breakage).
+if ! unzip -l "$ZIP_FILE" | grep -q "lib/stats.js"; then
+    echo "❌ lib/ missing from package — aborting (function would break)"
+    exit 1
+fi
+echo "✅ Verified lib/ is included in package"
 
 # Add optional files if they exist
 [ -f "parse-complete.js" ] && zip "$ZIP_FILE" parse-complete.js 2>/dev/null

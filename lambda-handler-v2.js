@@ -49,6 +49,19 @@ const TASK_DIR = "/var/task";
 const DYNAMODB_TABLE = process.env.DYNAMODB_TABLE || "utr-year-in-review";
 const RATE_LIMIT_TABLE = process.env.RATE_LIMIT_TABLE || "utr-rate-limits";
 
+// Canonical per-profile bundle slot. The table's composite key is
+// (profileId, year); the bundle covers all years, so it lives at year 0.
+const BUNDLE_YEAR = 0;
+// Bundles older than this are re-scraped on request so the site stays
+// current year-round.
+const MAX_DATA_AGE_DAYS = 7;
+// A pending record older than this is assumed dead (scrape crashed without
+// marking failure) and may be reclaimed.
+const PENDING_TIMEOUT_MINUTES = 15;
+// After a failed refresh, serve the stale bundle (flagged stale) for this long
+// before trying another scrape.
+const RETRY_BACKOFF_MINUTES = 60;
+
 // Rate limiting removed - DynamoDB pending status prevents duplicate expensive scrapes
 
 // Helper to ensure all responses have CORS headers
@@ -162,6 +175,205 @@ function extractIP(event) {
   return "unknown";
 }
 
+// Session slot for the reusable UTR JWT (refreshed on every scrape). Keyed
+// with a non-numeric profileId so it never collides with a real player.
+const SESSION_KEY = { profileId: "_session", year: BUNDLE_YEAR };
+
+// True if the JWT parses and has more than a minute left before expiry.
+function isValid(jwt) {
+  if (!jwt || typeof jwt !== "string") return false;
+  try {
+    const payload = JSON.parse(
+      Buffer.from(jwt.split(".")[1], "base64").toString(),
+    );
+    return payload.exp && payload.exp * 1000 > Date.now() + 60000;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Read a valid (unexpired) UTR JWT for authenticated API calls like search.
+// Prefers the token refreshed by the most recent scrape (DynamoDB), and
+// falls back to the one bundled with the deploy package.
+async function getUtrJwt() {
+  // 1. DynamoDB session slot (freshest — updated by each scrape).
+  if (dynamoDocClient) {
+    try {
+      const r = await dynamoDocClient.send(
+        new GetCommand({ TableName: DYNAMODB_TABLE, Key: SESSION_KEY }),
+      );
+      if (isValid(r.Item?.jwt)) return r.Item.jwt;
+    } catch (e) {
+      console.error("Error reading session jwt:", e.message);
+    }
+  }
+
+  // 2. Fall back to the auth state bundled at deploy time.
+  try {
+    const bundled = path.join(TASK_DIR, "auth-state-lambda.json");
+    if (fs.existsSync(bundled)) {
+      const auth = JSON.parse(fs.readFileSync(bundled, "utf8"));
+      const jwt = (auth.cookies || []).find((c) => c.name === "jwt")?.value;
+      if (isValid(jwt)) return jwt;
+    }
+  } catch (e) {
+    console.error("Error reading bundled jwt:", e.message);
+  }
+  return null;
+}
+
+// Persist a freshly scraped JWT so search stays authenticated between deploys.
+async function storeUtrJwt(cacheDir) {
+  if (!dynamoDocClient) return;
+  try {
+    const authPath = path.join(cacheDir, "auth-state.json");
+    if (!fs.existsSync(authPath)) return;
+    const auth = JSON.parse(fs.readFileSync(authPath, "utf8"));
+    const jwt = (auth.cookies || []).find((c) => c.name === "jwt")?.value;
+    if (!jwt) return;
+    await saveUtrJwt(jwt);
+  } catch (e) {
+    console.error("Could not store jwt:", e.message);
+  }
+}
+
+async function saveUtrJwt(jwt) {
+  if (!dynamoDocClient) return;
+  await dynamoDocClient.send(
+    new PutCommand({
+      TableName: DYNAMODB_TABLE,
+      Item: { ...SESSION_KEY, jwt, updatedAt: new Date().toISOString() },
+    }),
+  );
+  console.log("Stored refreshed UTR jwt for search");
+}
+
+// Self-heal for search: when no stored token is valid (or UTR rejects it),
+// log in directly over HTTP with the Lambda's UTR credentials instead of
+// waiting for the next full scrape to refresh it. Concurrent callers share
+// one login, and a failed login is not retried for a few minutes so a bad
+// password doesn't hammer UTR's auth endpoint.
+const LOGIN_RETRY_COOLDOWN_MS = 5 * 60 * 1000;
+let loginInFlight = null;
+let lastLoginFailureAt = 0;
+
+async function refreshUtrJwt() {
+  if (loginInFlight) return loginInFlight;
+  if (Date.now() - lastLoginFailureAt < LOGIN_RETRY_COOLDOWN_MS) return null;
+  loginInFlight = (async () => {
+    try {
+      const jwt = await loginForUtrJwt();
+      if (!isValid(jwt)) throw new Error("login returned no valid jwt");
+      try {
+        await saveUtrJwt(jwt);
+      } catch (e) {
+        console.error("Could not store jwt:", e.message);
+      }
+      return jwt;
+    } catch (e) {
+      console.error("UTR login for search failed:", e.message);
+      lastLoginFailureAt = Date.now();
+      return null;
+    } finally {
+      loginInFlight = null;
+    }
+  })();
+  return loginInFlight;
+}
+
+async function loginForUtrJwt() {
+  const email = process.env.UTR_EMAIL;
+  const password = process.env.UTR_PASSWORD;
+  if (!email || !password) throw new Error("UTR credentials not set");
+
+  const r = await fetch("https://app.utrsports.net/api/v1/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({ email, password }),
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!r.ok) throw new Error(`login returned ${r.status}`);
+
+  // UTR sets the token as a `jwt` cookie; some responses also echo it in
+  // the body, so accept either.
+  const cookies =
+    typeof r.headers.getSetCookie === "function"
+      ? r.headers.getSetCookie()
+      : [r.headers.get("set-cookie") || ""];
+  for (const c of cookies) {
+    const m = /(?:^|[;,]\s*)jwt=([^;]+)/.exec(c);
+    if (m) return m[1];
+  }
+  const body = await r.json().catch(() => ({}));
+  return body.jwt || body.token || null;
+}
+
+// Proxy UTR's player search (server-side to avoid the browser CORS preflight
+// that its API rejects). Returns a trimmed list of { id, name, location, utr }.
+async function handleSearch(query) {
+  const q = String(query || "").trim();
+  if (q.length < 2) {
+    return createCORSResponse(200, { success: true, results: [] });
+  }
+  const jwt = (await getUtrJwt()) || (await refreshUtrJwt());
+  if (!jwt) {
+    return createCORSResponse(200, {
+      success: false,
+      error: "Search is temporarily unavailable (no valid session).",
+    });
+  }
+  try {
+    const url =
+      "https://api.utrsports.net/v2/search/players?query=" +
+      encodeURIComponent(q) +
+      "&top=10";
+    const search = (token) =>
+      fetch(url, {
+        headers: {
+          accept: "application/json",
+          authorization: "Bearer " + token,
+        },
+      });
+    let r = await search(jwt);
+    // A token can be revoked before it expires; log in again and retry once.
+    if (r.status === 401 || r.status === 403) {
+      const fresh = await refreshUtrJwt();
+      if (fresh) r = await search(fresh);
+    }
+    if (!r.ok) {
+      console.error("UTR search returned", r.status);
+      return createCORSResponse(200, {
+        success: false,
+        error: `Search failed (${r.status}).`,
+      });
+    }
+    const body = await r.json();
+    const hits = body.players?.hits || body.hits || [];
+    const results = hits
+      .map((h) => {
+        const s = h.source || h;
+        const loc = s.location && (s.location.display || s.location.cityStateZip);
+        return {
+          id: String(s.id),
+          name:
+            s.displayName ||
+            `${s.firstName || ""} ${s.lastName || ""}`.trim(),
+          location: loc || null,
+          utr: s.singlesUtrDisplay || (s.singlesUtr ? s.singlesUtr.toFixed(2) : null),
+          gender: s.gender || null,
+        };
+      })
+      .filter((r) => r.id && r.name);
+    return createCORSResponse(200, { success: true, results });
+  } catch (e) {
+    console.error("Search error:", e.message);
+    return createCORSResponse(200, {
+      success: false,
+      error: "Search error.",
+    });
+  }
+}
+
 // Function to check for cached files in DynamoDB
 async function checkCachedFiles(profileId) {
   try {
@@ -262,12 +474,17 @@ const mainHandler = async (event) => {
     event.requestContext?.http?.method ||
     event.requestContext?.httpMethod;
   if (httpMethod === "GET") {
+    // Player name search: /generate?search=<name>
+    const searchQuery = event.queryStringParameters?.search;
+    if (searchQuery != null) {
+      return await handleSearch(searchQuery);
+    }
     const profileId = event.queryStringParameters?.profileId;
     if (profileId) {
       return await checkCachedFiles(profileId);
     }
     return createCORSResponse(400, {
-      error: "profileId query parameter is required",
+      error: "profileId or search query parameter is required",
     });
   }
 
@@ -321,10 +538,16 @@ const mainHandler = async (event) => {
       });
     }
 
+    // Player name search (POST { search: "<name>" }). Routed through POST
+    // because that's the method wired on the API Gateway resource.
+    if (body.search != null) {
+      return await handleSearch(body.search);
+    }
+
     const { profileId } = body;
 
-    // Always use 2025 for year
-    const year = 2025;
+    // All data lives in the canonical bundle slot
+    const year = BUNDLE_YEAR;
 
     // Validate input
     if (!profileId) {
@@ -369,93 +592,73 @@ const mainHandler = async (event) => {
 
     console.log(`Starting scrape for profile ${profileId}, year ${year}`);
 
-    // Check if data already exists in DynamoDB
-    // First try with year 2025, then scan for any year if not found (for backward compatibility)
+    // Check for an existing bundle in DynamoDB. Fresh bundles are returned
+    // immediately; stale ones (older than MAX_DATA_AGE_DAYS) fall through to
+    // a re-scrape, with the stale bundle preserved as a fallback in case the
+    // scrape fails.
+    // updatedAt of the stale bundle, restored if the refresh fails so the
+    // bundle keeps reporting its true age instead of looking fresh.
+    let staleUpdatedAt = null;
     try {
-      let getResponse = await dynamoDocClient.send(
+      const getResponse = await dynamoDocClient.send(
         new GetCommand({
           TableName: DYNAMODB_TABLE,
           Key: {
             profileId: profileId,
-            year: parseInt(year), // year is 2025
+            year: year,
           },
         }),
       );
 
-      // If not found with year 2025, scan for any completed record with this profileId
-      // (for backward compatibility with old data that might have different years)
-      if (!getResponse.Item) {
-        console.log(
-          "No record found with year 2025, scanning for any completed record...",
-        );
-        const { ScanCommand } = require("@aws-sdk/lib-dynamodb");
-        const scanResponse = await dynamoDocClient.send(
-          new ScanCommand({
-            TableName: DYNAMODB_TABLE,
-            FilterExpression: "profileId = :pid AND #s = :status",
-            ExpressionAttributeNames: {
-              "#s": "status",
-            },
-            ExpressionAttributeValues: {
-              ":pid": profileId,
-              ":status": "completed",
-            },
-          }),
-        );
-
-        if (scanResponse.Items && scanResponse.Items.length > 0) {
-          // Use the most recent completed record
-          const completedItems = scanResponse.Items.filter((item) => item.data);
-          if (completedItems.length > 0) {
-            // Sort by updatedAt descending to get the most recent
-            completedItems.sort((a, b) => {
-              const aTime = new Date(a.updatedAt || a.createdAt || 0).getTime();
-              const bTime = new Date(b.updatedAt || b.createdAt || 0).getTime();
-              return bTime - aTime;
-            });
-            const mostRecent = completedItems[0];
-            console.log(
-              `Found completed record with year ${mostRecent.year}, returning it`,
-            );
-            return corsResponse(200, {
-              success: true,
-              message: "Review data retrieved from cache",
-              data: mostRecent.data,
-            });
-          }
-        }
-      }
-
       if (getResponse.Item) {
         const item = getResponse.Item;
+        const lastUpdated = new Date(
+          item.updatedAt || item.createdAt || 0,
+        ).getTime();
+        const ageDays = (Date.now() - lastUpdated) / (24 * 60 * 60 * 1000);
         console.log(
-          `Found existing record in DynamoDB with status: ${item.status}, year: ${item.year}`,
+          `Found record: status=${item.status}, age=${ageDays.toFixed(1)} days`,
         );
 
-        // If completed, return the data immediately
         if (item.status === "completed" && item.data) {
-          console.log("Data is completed, returning immediately");
-          return corsResponse(200, {
-            success: true,
-            message: "Review data retrieved from cache",
-            data: item.data,
-          });
-        }
-
-        // If pending, return processing message
-        if (item.status === "pending") {
-          console.log("Data is pending, returning processing message");
-          return corsResponse(200, {
-            success: false,
-            message:
-              "Your data is being processed. Please check back in 30-60 seconds.",
-            error:
-              "Review data is currently being generated. Please check back in 30-60 seconds.",
-          });
-        }
-
-        // If failed, we can retry (fall through)
-        if (item.status === "failed") {
+          if (ageDays < MAX_DATA_AGE_DAYS) {
+            console.log("Bundle is fresh, returning immediately");
+            return corsResponse(200, {
+              success: true,
+              message: "Data retrieved from cache",
+              data: item.data,
+            });
+          }
+          const lastAttempt = new Date(item.lastAttemptAt || 0).getTime();
+          if (Date.now() - lastAttempt < RETRY_BACKOFF_MINUTES * 60 * 1000) {
+            console.log("Bundle is stale but a refresh failed recently");
+            return corsResponse(200, {
+              success: true,
+              stale: true,
+              message:
+                "Refresh failed recently; showing previously cached data.",
+              data: item.data,
+            });
+          }
+          console.log("Bundle is stale - refreshing");
+          staleUpdatedAt = item.updatedAt || item.createdAt || null;
+          // Fall through to re-scrape.
+        } else if (item.status === "pending") {
+          const ageMinutes = (Date.now() - lastUpdated) / (60 * 1000);
+          if (ageMinutes < PENDING_TIMEOUT_MINUTES) {
+            console.log("Scrape already in progress");
+            return corsResponse(200, {
+              success: false,
+              message:
+                "Your data is being processed. Please check back in 30-60 seconds.",
+              error:
+                "Review data is currently being generated. Please check back in 30-60 seconds.",
+            });
+          }
+          console.log(
+            "Pending record timed out (scrape likely died) - retrying",
+          );
+        } else if (item.status === "failed") {
           console.log("Previous attempt failed, will retry");
         }
       }
@@ -464,27 +667,32 @@ const mainHandler = async (event) => {
       // Continue to try creating new record
     }
 
-    // Try to create a pending record (only if it doesn't exist)
-    // This prevents duplicate processing
+    // Claim the work slot. The condition lets a request claim when there is
+    // no record, the record isn't pending, or a pending record has timed out
+    // — concurrent requests can't double-scrape, but stale locks self-heal.
+    // UpdateCommand (not Put) so an existing stale bundle's `data` survives.
     try {
+      const nowIso = new Date().toISOString();
+      const staleCutoff = new Date(
+        Date.now() - PENDING_TIMEOUT_MINUTES * 60 * 1000,
+      ).toISOString();
       await dynamoDocClient.send(
-        new PutCommand({
+        new UpdateCommand({
           TableName: DYNAMODB_TABLE,
-          Item: {
-            profileId: profileId,
-            year: parseInt(year),
-            status: "pending",
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-          },
+          Key: { profileId: profileId, year: year },
+          UpdateExpression:
+            "SET #s = :pending, updatedAt = :now, createdAt = if_not_exists(createdAt, :now)",
           ConditionExpression:
-            "attribute_not_exists(profileId) AND attribute_not_exists(#yr)",
-          ExpressionAttributeNames: {
-            "#yr": "year",
+            "attribute_not_exists(profileId) OR #s <> :pending OR updatedAt < :staleCutoff",
+          ExpressionAttributeNames: { "#s": "status" },
+          ExpressionAttributeValues: {
+            ":pending": "pending",
+            ":now": nowIso,
+            ":staleCutoff": staleCutoff,
           },
         }),
       );
-      console.log("Created pending record in DynamoDB");
+      console.log("Claimed pending slot in DynamoDB");
     } catch (putError) {
       if (putError.name === "ConditionalCheckFailedException") {
         // Record already exists - someone else is processing or it's pending
@@ -502,9 +710,8 @@ const mainHandler = async (event) => {
       }
     }
 
-    // Ultra-fast mode: Run scraping synchronously (only takes ~30 seconds now!)
-    console.log("Running ultra-fast scrape synchronously...");
-    console.log("Expected time: ~30 seconds");
+    // Run scraping synchronously (fast mode, ~45-90 seconds)
+    console.log("Running scrape synchronously...");
     console.log("Profile ID:", profileId);
     console.log("Year:", year);
     console.log("Has credentials:", !!(utrEmail && utrPassword));
@@ -514,7 +721,7 @@ const mainHandler = async (event) => {
       // Run the scrape and wait for it to complete
       console.log("Calling performScrapeAndUpload...");
       await performScrapeAndUpload(profileId, utrEmail, utrPassword, year);
-      console.log("✅ Ultra-fast scrape completed successfully!");
+      console.log("✅ Scrape completed successfully!");
 
       // Fetch the completed data from DynamoDB
       const result = await dynamoDocClient.send(
@@ -529,7 +736,7 @@ const mainHandler = async (event) => {
         return corsResponse(200, {
           success: true,
           data: result.Item.data,
-          message: "Year in review generated successfully!",
+          message: "Data generated successfully!",
         });
       } else {
         // Shouldn't happen, but handle gracefully
@@ -545,23 +752,65 @@ const mainHandler = async (event) => {
       console.error("Error message:", scrapeError.message);
       console.error("Error stack:", scrapeError.stack);
 
-      // Mark as failed in DynamoDB
+      // Record the failure. If a previous (stale) bundle exists, restore its
+      // completed status and serve it rather than losing good data.
+      let staleFallback = null;
       try {
-        await dynamoDocClient.send(
-          new PutCommand({
+        const existing = await dynamoDocClient.send(
+          new GetCommand({
             TableName: DYNAMODB_TABLE,
-            Item: {
-              profileId,
-              year,
-              status: "failed",
-              error: scrapeError.message,
-              updatedAt: new Date().toISOString(),
-            },
+            Key: { profileId, year },
           }),
         );
-        console.log("Marked record as failed in DynamoDB");
+        if (existing.Item && existing.Item.data) {
+          staleFallback = existing.Item.data;
+          await dynamoDocClient.send(
+            new UpdateCommand({
+              TableName: DYNAMODB_TABLE,
+              Key: { profileId, year },
+              // The claim overwrote updatedAt; put the bundle's real age back.
+              UpdateExpression:
+                "SET #s = :completed, lastError = :err, lastAttemptAt = :now, updatedAt = :dataAt",
+              ExpressionAttributeNames: { "#s": "status" },
+              ExpressionAttributeValues: {
+                ":completed": "completed",
+                ":err": scrapeError.message,
+                ":now": new Date().toISOString(),
+                ":dataAt":
+                  staleUpdatedAt ||
+                  existing.Item.data.scrapedAt ||
+                  new Date(0).toISOString(),
+              },
+            }),
+          );
+          console.log("Restored stale bundle after failed refresh");
+        } else {
+          await dynamoDocClient.send(
+            new PutCommand({
+              TableName: DYNAMODB_TABLE,
+              Item: {
+                profileId,
+                year,
+                status: "failed",
+                error: scrapeError.message,
+                updatedAt: new Date().toISOString(),
+              },
+            }),
+          );
+          console.log("Marked record as failed in DynamoDB");
+        }
       } catch (dbError) {
         console.error("Failed to update error status:", dbError);
+      }
+
+      if (staleFallback) {
+        return corsResponse(200, {
+          success: true,
+          stale: true,
+          message:
+            "Refresh failed; showing previously cached data. It will retry on a later visit.",
+          data: staleFallback,
+        });
       }
 
       return corsResponse(500, {
@@ -655,11 +904,8 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
   fs.mkdirSync(cacheDir, { recursive: true });
 
   const secretsPath = path.join(workDir, "secrets.json");
-  // Use profile ID in filename to avoid conflicts
-  const resultPath = path.join(
-    workDir,
-    `${profileId}-${year}-year-in-review.json`,
-  );
+  // Canonical bundle written by the generator
+  const resultPath = path.join(workDir, `${profileId}-data.json`);
 
   try {
     // Write credentials to temp file
@@ -736,13 +982,15 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
         );
 
         console.log("About to execute scraper command...");
-        const scraperCommand = `node ${scraperPath} ${profileId} --ultra-fast`;
+        // --fast: skips per-opponent rating histories but DOES fetch the
+        // player's own rating history, which the year-round site needs for
+        // the UTR journey chart and match-time ratings.
+        const scraperCommand = `node ${scraperPath} ${profileId} --fast`;
         console.log("Command:", scraperCommand);
         console.log("Working directory:", workDir);
-        console.log("⚡ Using ultra-fast mode (28s estimated time)");
 
         scraperOutput = await execAsync(scraperCommand, {
-          timeout: 120000, // 2 minutes (ultra-fast mode ~30s)
+          timeout: 240000, // 4 minutes (fast mode ~45-90s)
           maxBuffer: 10 * 1024 * 1024,
           env: scraperEnv,
           cwd: workDir, // Run from work directory so relative paths work
@@ -805,7 +1053,7 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
           OUTPUT_DIR: workDir, // Tell generator where to find scraper output
         };
         generatorOutput = await execAsync(
-          `node ${generatorPath} ${profileId} ${year}`,
+          `node ${generatorPath} ${profileId}`,
           {
             timeout: 60000, // 1 minute
             maxBuffer: 10 * 1024 * 1024,
@@ -826,74 +1074,26 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
 
       // Read result
       if (!fs.existsSync(resultPath)) {
-        // Try default location with profile ID (generator now writes with profile ID)
-        const defaultResultPathWithId = path.join(
-          workDir,
-          `${profileId}-${year}-year-in-review.json`,
-        );
-        const defaultResultPath = path.join(workDir, "year-in-review.json");
-
-        if (fs.existsSync(defaultResultPathWithId)) {
-          // Generator wrote with profile ID - use it directly
-          // resultPath already has the correct name, so just verify it exists
-          if (defaultResultPathWithId !== resultPath) {
-            fs.copyFileSync(defaultResultPathWithId, resultPath);
-          }
-        } else if (fs.existsSync(defaultResultPath)) {
-          // Fallback to old naming convention (for backwards compatibility)
-          fs.copyFileSync(defaultResultPath, resultPath);
-        } else {
-          throw new Error(
-            `Review file not generated. Checked: ${resultPath}, ${defaultResultPathWithId}, ${defaultResultPath}`,
-          );
-        }
+        throw new Error(`Bundle not generated. Expected: ${resultPath}`);
       }
 
       const result = JSON.parse(fs.readFileSync(resultPath, "utf8"));
 
-      // Check if we have matches - don't generate CSV if no matches found
-      const singlesMatches =
-        result.singles?.matches || result.singlesMatches || [];
-      const hasMatches = singlesMatches.length > 0;
-
-      if (!hasMatches) {
-        console.log("⚠️  No matches found");
-
-        // Check if login failed
+      // A bundle with zero matches means the scrape effectively failed
+      // (usually authentication). Throw so the caller's failure handling
+      // preserves any previous good bundle instead of overwriting it.
+      const totalMatches =
+        (result.singles?.matches?.length || 0) +
+        (result.doubles?.matches?.length || 0);
+      if (totalMatches === 0) {
         const loginFailed =
           result.loginSuccessful === false || result.loginError;
-        let errorMessage =
-          "No matches found. The scraper completed but found 0 matches.";
-
-        if (loginFailed) {
-          errorMessage =
-            "Authentication failed - unable to access match data. Please check UTR credentials. " +
-            (result.loginError || "");
-          console.error("Login failed:", errorMessage);
-        } else {
-          console.error("No matches found - cannot save to DynamoDB");
-        }
-
-        // Update DynamoDB with failed status
-        if (dynamoDocClient) {
-          try {
-            await dynamoDocClient.send(
-              new PutCommand({
-                TableName: DYNAMODB_TABLE,
-                Item: {
-                  profileId: profileId,
-                  year: parseInt(year),
-                  status: "failed",
-                  error: errorMessage,
-                  updatedAt: new Date().toISOString(),
-                },
-              }),
-            );
-          } catch (dynamoError) {
-            console.error("Error updating DynamoDB:", dynamoError);
-          }
-        }
-        return; // Exit async function, don't save
+        const errorMessage = loginFailed
+          ? "Authentication failed - unable to access match data. " +
+            (result.loginError || "")
+          : "No matches found. The scraper completed but found 0 matches.";
+        console.error(errorMessage);
+        throw new Error(errorMessage);
       }
 
       // Read the generated JSON data to return to user
@@ -914,10 +1114,9 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
         console.log("Using already-parsed result data");
       }
 
-      // Save JSON to DynamoDB with completed status
+      // Save bundle to DynamoDB with completed status
       if (dynamoDocClient) {
         try {
-          // Use reviewData if available, otherwise use result
           const jsonToUpload = reviewData || result;
 
           await dynamoDocClient.send(
@@ -925,7 +1124,7 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
               TableName: DYNAMODB_TABLE,
               Item: {
                 profileId: profileId,
-                year: parseInt(year),
+                year: BUNDLE_YEAR,
                 status: "completed",
                 data: jsonToUpload,
                 createdAt: new Date().toISOString(),
@@ -933,9 +1132,11 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
               },
             }),
           );
-          console.log("JSON saved to DynamoDB with completed status");
+          console.log("Bundle saved to DynamoDB with completed status");
+          // Persist the freshly refreshed JWT so player search stays authed.
+          await storeUtrJwt(cacheDir);
         } catch (dynamoError) {
-          console.error("Error saving JSON to DynamoDB:", dynamoError);
+          console.error("Error saving bundle to DynamoDB:", dynamoError);
           // Continue anyway - we still have the JSON data
         }
       }

@@ -5,10 +5,7 @@
   "main": "scraper.js",
   "scripts": {
     "scrape": "node scraper-full.js",
-    "scrape:old": "node scraper.js",
-    "parse": "node parse-complete.js",
     "generate": "node generate-full-review.js",
-    "generate:old": "node generate-review.js",
     "serve": "npx http-server -p 8080 -o",
     "full": "node scraper-full.js && node generate-full-review.js"
   },

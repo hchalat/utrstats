@@ -5,6 +5,12 @@
 const puppeteer = require("puppeteer-core");
 const fs = require("fs");
 const path = require("path");
+const {
+  parseMatch,
+  inferYears,
+  attachRatingDeltas,
+} = require("./lib/match-parser");
+const { parseApiResults } = require("./lib/api-parser");
 
 // Use @sparticuz/chromium for Lambda (actively maintained, includes all dependencies)
 // This is the recommended package for AWS Lambda
@@ -34,7 +40,7 @@ const BASE_URL = "https://app.utrsports.net";
 // Cache settings
 // Use CACHE_DIR from environment if set (for Lambda), otherwise use local cache
 const CACHE_DIR = process.env.CACHE_DIR || path.join(__dirname, "cache");
-const CACHE_VERSION = "1.1"; // Bump this to invalidate cache
+const CACHE_VERSION = "3.0"; // Bump this to invalidate cache
 const CACHE_MAX_AGE_DAYS = 7; // Cache valid for 7 days
 const AUTH_STATE_FILE = path.join(CACHE_DIR, "auth-state.json");
 
@@ -140,14 +146,18 @@ async function saveAuthState(browser) {
 // Load credentials if available
 let credentials = null;
 try {
-  // Check SECRETS_PATH environment variable first (for Lambda), then fall back to __dirname
-  const secretsPath =
-    process.env.SECRETS_PATH || path.join(__dirname, "secrets.json");
-  if (fs.existsSync(secretsPath)) {
+  // Check SECRETS_PATH env var first (Lambda), then secrets/secrets.json, then secrets.json at root
+  const candidatePaths = [
+    process.env.SECRETS_PATH,
+    path.join(__dirname, "secrets", "secrets.json"),
+    path.join(__dirname, "secrets.json"),
+  ].filter(Boolean);
+  const secretsPath = candidatePaths.find((p) => fs.existsSync(p));
+  if (secretsPath) {
     credentials = JSON.parse(fs.readFileSync(secretsPath, "utf8"));
     console.log("📧 Credentials loaded from:", secretsPath);
   } else {
-    console.log("ℹ️  No secrets file found at:", secretsPath);
+    console.log("ℹ️  No secrets file found in:", candidatePaths.join(", "));
   }
 } catch (e) {
   console.log("ℹ️  Error loading secrets:", e.message);
@@ -624,154 +634,116 @@ async function scrapeUTR(profileId) {
           }
         }
 
-        // Wait for the login form - try multiple selectors with longer timeout
-        let emailFieldFound = false;
+        // Dismiss the cookie banner so it can't sit on top of the form.
+        const cookieDeclined = await page.evaluate(() => {
+          const btn = Array.from(document.querySelectorAll("button")).find(
+            (b) =>
+              /^\s*decline\s*$/i.test(b.innerText || "") &&
+              b.getBoundingClientRect().width > 0,
+          );
+          if (btn) btn.click();
+          return !!btn;
+        });
+        if (cookieDeclined) {
+          console.log("   Declined cookie banner");
+          await delay(500);
+        }
+
+        // UTR's sign-in form: #emailInput, then the "enter my password" link
+        // reveals #passwordInput. The default "SEND A LINK" submit button
+        // emails a magic link instead — never click it.
         const emailSelectors = [
+          "#emailInput",
           'input[type="email"]',
           'input[name="email"]',
           'input[placeholder*="email" i]',
           'input[id*="email" i]',
-          'input[type="text"]', // Sometimes email fields are type="text"
         ];
-
+        let workingEmailSelector = null;
+        try {
+          await page.waitForSelector(emailSelectors.join(", "), {
+            visible: true,
+            timeout: 15000,
+          });
+        } catch (e) {}
         for (const selector of emailSelectors) {
-          try {
-            await page.waitForSelector(selector, { timeout: 5000 });
-            emailFieldFound = true;
-            console.log(`   Found email field with selector: ${selector}`);
+          const visible = await page.evaluate((sel) => {
+            return Array.from(document.querySelectorAll(sel)).some(
+              (el) => el.getBoundingClientRect().width > 0,
+            );
+          }, selector);
+          if (visible) {
+            workingEmailSelector = selector;
             break;
-          } catch (e) {
-            // Try next selector
           }
         }
 
-        if (!emailFieldFound) {
-          // Take screenshot for debugging
+        if (workingEmailSelector) {
+          console.log(`   Found email field with selector: ${workingEmailSelector}`);
+          // Fill via the native value setter + input event: React-controlled
+          // and works even if an overlay makes the field "not clickable".
+          await page.evaluate(
+            (sel, value) => {
+              const el = Array.from(document.querySelectorAll(sel)).find(
+                (e) => e.getBoundingClientRect().width > 0,
+              );
+              el.scrollIntoView({ block: "center" });
+              el.focus();
+              const setter = Object.getOwnPropertyDescriptor(
+                HTMLInputElement.prototype,
+                "value",
+              ).set;
+              setter.call(el, value);
+              el.dispatchEvent(new Event("input", { bubbles: true }));
+              el.dispatchEvent(new Event("change", { bubbles: true }));
+            },
+            workingEmailSelector,
+            credentials.username || credentials.email,
+          );
+          console.log(`   ✅ Filled email using selector: ${workingEmailSelector}`);
+        } else {
           await page.screenshot({
             path: path.join(CACHE_DIR, "login-timeout.png"),
           });
           console.log("   ⚠️  Email field not found, screenshot saved");
-          // Continue anyway - maybe the page structure is different
-        }
-
-        // Fill in credentials - use the selector that worked
-        let emailInput = null;
-        let workingEmailSelector = null;
-        for (const selector of emailSelectors) {
-          try {
-            emailInput = await page.$(selector);
-            if (emailInput) {
-              workingEmailSelector = selector;
-              break;
-            }
-          } catch (e) {}
-        }
-
-        if (emailInput) {
-          // Clear and type email
-          await emailInput.focus();
-          await page.keyboard.down("Control");
-          await page.keyboard.press("a");
-          await page.keyboard.up("Control");
-          await page.keyboard.press("Backspace");
-          await emailInput.type(credentials.username || credentials.email, {
-            delay: 50,
-          });
-          console.log(
-            `   ✅ Filled email using selector: ${workingEmailSelector}`,
-          );
-        } else {
-          console.log("   ⚠️  Could not find email input");
         }
         await delay(1000);
 
-        // UTR uses a two-step login: email first, then click Continue to show password field
-        console.log("   Looking for Continue button to show password field...");
-        let continueClicked = false;
-
-        // Try to find and click Continue button using XPath
-        const clicked = await page.evaluate(() => {
-          const xpath =
-            "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue')]";
-          const result = document.evaluate(
-            xpath,
-            document,
-            null,
-            XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-            null,
-          );
-          for (let i = 0; i < result.snapshotLength; i++) {
-            const btn = result.snapshotItem(i);
-            const rect = btn.getBoundingClientRect();
-            if (
-              rect.width > 0 &&
-              rect.height > 0 &&
-              window.getComputedStyle(btn).visibility !== "hidden" &&
-              window.getComputedStyle(btn).display !== "none"
-            ) {
-              btn.click();
-              return true;
-            }
-          }
-          return false;
+        // Switch to password login ("enter my password"; older UI: "Continue").
+        console.log("   Switching to password login...");
+        const passwordModeText = await page.evaluate(() => {
+          const RE = /enter my password|use (a |my )?password|^\s*continue\s*$/i;
+          const btn = Array.from(
+            document.querySelectorAll("button, a, [role='button']"),
+          ).find((b) => {
+            const text = (b.innerText || "").trim();
+            const rect = b.getBoundingClientRect();
+            return RE.test(text) && rect.width > 0 && rect.height > 0;
+          });
+          if (!btn) return null;
+          btn.click();
+          return btn.innerText.trim();
         });
-        if (clicked) {
-          console.log("   ✅ Clicked Continue button");
-          continueClicked = true;
-        }
-
-        // If XPath didn't work, try standard selectors
-        if (!continueClicked) {
-          const submitBtn =
-            (await page.$('button[type="submit"]')) ||
-            (await page.$('input[type="submit"]'));
-          if (submitBtn) {
-            const isVisible = await page.evaluate((el) => {
-              const rect = el.getBoundingClientRect();
-              return rect.width > 0 && rect.height > 0;
-            }, submitBtn);
-            if (isVisible) {
-              await submitBtn.click();
-              console.log("   ✅ Clicked submit button (Continue)");
-              continueClicked = true;
-            }
-          }
-        }
-
-        // If still not found, try pressing Enter in email field
-        if (!continueClicked && emailInput) {
-          try {
-            await emailInput.focus();
-            await page.keyboard.press("Enter");
-            console.log("   ✅ Pressed Enter in email field");
-            continueClicked = true;
-          } catch (e) {}
-        }
-
-        // Wait for password field to appear after clicking Continue
-        if (continueClicked) {
-          console.log("   Waiting for password field to appear...");
-          await delay(2000);
-
-          // Wait for password field with timeout
+        if (passwordModeText) {
+          console.log(`   ✅ Clicked "${passwordModeText}"`);
           try {
             await page.waitForSelector('input[type="password"]', {
-              timeout: 5000,
+              visible: true,
+              timeout: 8000,
             });
             console.log("   ✅ Password field appeared");
           } catch (e) {
-            console.log(
-              "   ⚠️  Password field did not appear after Continue click",
-            );
+            console.log("   ⚠️  Password field did not appear");
           }
         } else {
           console.log(
-            "   ⚠️  Could not find Continue button - password field may not appear",
+            "   ⚠️  Could not find the password-login option - password field may not appear",
           );
         }
 
         // Find password field - try multiple methods with longer waits
         const passwordSelectors = [
+          "#passwordInput",
           'input[type="password"]',
           'input[name="password"]',
           'input[name*="password" i]',
@@ -917,67 +889,90 @@ async function scrapeUTR(profileId) {
         // Click submit button - try multiple methods
         let submitSuccess = false;
 
-        // Method 1: Try standard submit button
+        // Method 1: Find the button whose visible text is "Sign In" / "Log In".
+        // UTR's login modal also shows a passwordless "SEND A LINK" button — match
+        // text explicitly so a broad selector doesn't grab the wrong one.
         try {
-          const submitSelectors = [
-            'button[type="submit"]',
-            'input[type="submit"]',
-            'button[type="button"]', // Sometimes submit buttons are type="button"
-            '[type="submit"]',
-          ];
-
-          for (const selector of submitSelectors) {
-            try {
-              const btn = await page.$(selector);
-              if (btn) {
-                // Check if it's visible and clickable
-                const isVisible = await page.evaluate((el) => {
-                  const rect = el.getBoundingClientRect();
-                  return (
-                    rect.width > 0 &&
-                    rect.height > 0 &&
-                    window.getComputedStyle(el).visibility !== "hidden" &&
-                    window.getComputedStyle(el).display !== "none"
-                  );
-                }, btn);
-
-                if (isVisible) {
-                  await btn.click();
-                  console.log(`   Clicked submit button (${selector})`);
-                  submitSuccess = true;
-                  break;
-                }
-              }
-            } catch (e) {}
+          const clicked = await page.evaluate(() => {
+            const buttons = Array.from(
+              document.querySelectorAll('button, input[type="submit"]'),
+            );
+            const SIGN_IN_RE = /^\s*(sign\s*in|log\s*in)\s*$/i;
+            const candidates = buttons.filter((btn) => {
+              const text = (btn.innerText || btn.value || "").trim();
+              if (!SIGN_IN_RE.test(text)) return false;
+              const rect = btn.getBoundingClientRect();
+              const style = window.getComputedStyle(btn);
+              return (
+                rect.width > 0 &&
+                rect.height > 0 &&
+                style.visibility !== "hidden" &&
+                style.display !== "none" &&
+                !btn.disabled
+              );
+            });
+            if (candidates.length === 0) return null;
+            // Prefer the button nearest the password field (usually the same form).
+            const pwd = document.querySelector('input[type="password"]');
+            let target = candidates[0];
+            if (pwd) {
+              const pwdRect = pwd.getBoundingClientRect();
+              target = candidates.reduce((best, btn) => {
+                const r = btn.getBoundingClientRect();
+                const dist = Math.hypot(
+                  r.left - pwdRect.left,
+                  r.top - pwdRect.top,
+                );
+                const bestRect = best.getBoundingClientRect();
+                const bestDist = Math.hypot(
+                  bestRect.left - pwdRect.left,
+                  bestRect.top - pwdRect.top,
+                );
+                return dist < bestDist ? btn : best;
+              }, candidates[0]);
+            }
+            target.click();
+            return (target.innerText || target.value || "").trim();
+          });
+          if (clicked) {
+            console.log(`   Clicked submit button (text="${clicked}")`);
+            submitSuccess = true;
           }
         } catch (e) {}
 
-        // Method 2: Try XPath for buttons with text
+        // Method 2: Fall back to standard submit button selectors.
         if (!submitSuccess) {
           try {
-            const clicked = await page.evaluate(() => {
-              const xpath =
-                "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'log in') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in')]";
-              const result = document.evaluate(
-                xpath,
-                document,
-                null,
-                XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-                null,
-              );
-              for (let i = 0; i < result.snapshotLength; i++) {
-                const btn = result.snapshotItem(i);
-                const rect = btn.getBoundingClientRect();
-                if (rect.width > 0 && rect.height > 0) {
-                  btn.click();
-                  return true;
+            const submitSelectors = [
+              'button[type="submit"]',
+              'input[type="submit"]',
+              '[type="submit"]',
+            ];
+
+            for (const selector of submitSelectors) {
+              try {
+                const btn = await page.$(selector);
+                if (btn) {
+                  const isVisible = await page.evaluate((el) => {
+                    const rect = el.getBoundingClientRect();
+                    return (
+                      rect.width > 0 &&
+                      rect.height > 0 &&
+                      window.getComputedStyle(el).visibility !== "hidden" &&
+                      window.getComputedStyle(el).display !== "none" &&
+                      // Passwordless button: would email a magic link.
+                      !/send a link/i.test(el.innerText || el.value || "")
+                    );
+                  }, btn);
+
+                  if (isVisible) {
+                    await btn.click();
+                    console.log(`   Clicked submit button (${selector})`);
+                    submitSuccess = true;
+                    break;
+                  }
                 }
-              }
-              return false;
-            });
-            if (clicked) {
-              console.log("   Clicked submit button (XPath)");
-              submitSuccess = true;
+              } catch (e) {}
             }
           } catch (e) {}
         }
@@ -1249,6 +1244,48 @@ async function scrapeUTR(profileId) {
       `Player: ${results.player.name || "Unknown"} (UTR: ${results.player.singlesUtr || "?"})`,
     );
 
+    // ===== MATCHES VIA UTR API (primary path) =====
+    // One authenticated call returns the full career with labeled winners,
+    // structured set scores, and explicit tiebreak points — no score-digit
+    // parsing. DOM scraping below remains as a fallback.
+    let apiMatchesLoaded = false;
+    try {
+      const apiStart = Date.now();
+      const apiData = await fetchApiData(page, profileId);
+      if (apiData?.profile) {
+        const p = apiData.profile;
+        results.player = {
+          id: profileId,
+          name:
+            [p.firstName, p.lastName].filter(Boolean).join(" ") ||
+            results.player.name,
+          singlesUtr: p.singlesUtr || results.player.singlesUtr,
+          doublesUtr: p.doublesUtr || results.player.doublesUtr,
+        };
+      }
+      if (apiData?.results) {
+        if (apiData.results._v4Counts) {
+          console.log(`   v4 events per call: ${apiData.results._v4Counts}`);
+        }
+        const parsed = parseApiResults(apiData.results, profileId);
+        if (parsed.singlesMatches.length + parsed.doublesMatches.length > 0) {
+          results.singlesMatches = parsed.singlesMatches;
+          results.doublesMatches = parsed.doublesMatches;
+          results.dataSource = "api";
+          apiMatchesLoaded = true;
+          console.log(
+            `✅ API results: ${parsed.singlesMatches.length} singles, ` +
+              `${parsed.doublesMatches.length} doubles (full career) in ` +
+              `${((Date.now() - apiStart) / 1000).toFixed(2)}s`,
+          );
+        }
+      }
+    } catch (e) {
+      console.log(
+        `⚠️  API fetch failed (${e.message}) — falling back to DOM scraping`,
+      );
+    }
+
     // ===== SINGLES RATING HISTORY =====
     const historyStart = Date.now();
 
@@ -1360,285 +1397,288 @@ async function scrapeUTR(profileId) {
       );
     } // End if (!ULTRA_FAST_MODE)
 
-    // ===== SINGLES MATCHES =====
-    const singlesMatchesStart = Date.now();
-    console.log("\n🎾 Getting singles matches...");
-    await page.goto(`${BASE_URL}/profiles/${profileId}?t=2`, {
-      waitUntil: "domcontentloaded",
-      timeout: 60000,
-    });
-    await delay(3000);
+    // ===== DOM MATCH SCRAPING (fallback when API unavailable) =====
+    if (!apiMatchesLoaded) {
+      // ===== SINGLES MATCHES =====
+      const singlesMatchesStart = Date.now();
+      console.log("\n🎾 Getting singles matches...");
+      await page.goto(`${BASE_URL}/profiles/${profileId}?t=2`, {
+        waitUntil: "domcontentloaded",
+        timeout: 60000,
+      });
+      await delay(3000);
 
-    // Ensure Singles tab is selected
-    try {
-      // Puppeteer: use XPath for text matching
-      await clickByXPath(page, "//button[contains(text(), 'Singles')]");
-      await delay(2000);
-    } catch (e) {}
+      // Ensure Singles tab is selected
+      try {
+        // Puppeteer: use XPath for text matching
+        await clickByXPath(page, "//button[contains(text(), 'Singles')]");
+        await delay(2000);
+      } catch (e) {}
 
-    // Wait for score cards to appear
-    try {
-      await page.waitForSelector(
-        '.utr-card, [class*="score-card"], [class*="match"]',
-        { timeout: 10000 },
+      // Wait for score cards to appear
+      try {
+        await page.waitForSelector(
+          '.utr-card, [class*="score-card"], [class*="match"]',
+          { timeout: 10000 },
+        );
+      } catch (e) {
+        console.log("   Waiting for matches to load...");
+        await delay(5000);
+      }
+
+      // Scroll to load all matches
+      await scrollToBottom(page);
+
+      // Debug: Check what's on the page
+      await page.screenshot({ path: path.join(CACHE_DIR, "matches-page.png") });
+
+      const pageDebug = await page.evaluate(() => {
+        // Get all class names that contain common match-related words
+        const allElements = document.querySelectorAll("*");
+        const matchClasses = new Set();
+        allElements.forEach((el) => {
+          if (el.className && typeof el.className === "string") {
+            const classes = el.className.split(" ");
+            classes.forEach((c) => {
+              if (
+                c.toLowerCase().includes("match") ||
+                c.toLowerCase().includes("score") ||
+                c.toLowerCase().includes("result") ||
+                c.toLowerCase().includes("event") ||
+                c.toLowerCase().includes("card")
+              ) {
+                matchClasses.add(c);
+              }
+            });
+          }
+        });
+
+        return {
+          title: document.title,
+          h1: document.querySelector("h1")?.innerText,
+          cardCount: document.querySelectorAll('.utr-card, [class*="score-card"]')
+            .length,
+          matchCount: document.querySelectorAll('[class*="match"]').length,
+          relevantClasses: Array.from(matchClasses).slice(0, 20),
+          bodyPreview: document.body.innerText.substring(0, 1000),
+        };
+      });
+      console.log(
+        `   Page: ${pageDebug.title}, Cards: ${pageDebug.cardCount}, H1: ${pageDebug.h1}`,
       );
-    } catch (e) {
-      console.log("   Waiting for matches to load...");
-      await delay(5000);
-    }
+      console.log(
+        `   Relevant classes found: ${pageDebug.relevantClasses.join(", ")}`,
+      );
 
-    // Scroll to load all matches
-    await scrollToBottom(page);
+      // Save body text for analysis
+      fs.writeFileSync(
+        path.join(CACHE_DIR, "page-text.txt"),
+        pageDebug.bodyPreview,
+      );
 
-    // Debug: Check what's on the page
-    await page.screenshot({ path: path.join(CACHE_DIR, "matches-page.png") });
-
-    const pageDebug = await page.evaluate(() => {
-      // Get all class names that contain common match-related words
-      const allElements = document.querySelectorAll("*");
-      const matchClasses = new Set();
-      allElements.forEach((el) => {
-        if (el.className && typeof el.className === "string") {
-          const classes = el.className.split(" ");
-          classes.forEach((c) => {
-            if (
-              c.toLowerCase().includes("match") ||
-              c.toLowerCase().includes("score") ||
-              c.toLowerCase().includes("result") ||
-              c.toLowerCase().includes("event") ||
-              c.toLowerCase().includes("card")
-            ) {
-              matchClasses.add(c);
-            }
-          });
-        }
+      // Quick check: count visible match cards to decide if worth scraping
+      const singlesMatchCount = await page.evaluate(() => {
+        const cards = document.querySelectorAll(
+          '.utr-card, [class*="score-card"], [class*="eventItem"]',
+        );
+        return cards.length;
       });
 
-      return {
-        title: document.title,
-        h1: document.querySelector("h1")?.innerText,
-        cardCount: document.querySelectorAll('.utr-card, [class*="score-card"]')
-          .length,
-        matchCount: document.querySelectorAll('[class*="match"]').length,
-        relevantClasses: Array.from(matchClasses).slice(0, 20),
-        bodyPreview: document.body.innerText.substring(0, 1000),
-      };
-    });
-    console.log(
-      `   Page: ${pageDebug.title}, Cards: ${pageDebug.cardCount}, H1: ${pageDebug.h1}`,
-    );
-    console.log(
-      `   Relevant classes found: ${pageDebug.relevantClasses.join(", ")}`,
-    );
-
-    // Save body text for analysis
-    fs.writeFileSync(
-      path.join(CACHE_DIR, "page-text.txt"),
-      pageDebug.bodyPreview,
-    );
-
-    // Quick check: count visible match cards to decide if worth scraping
-    const singlesMatchCount = await page.evaluate(() => {
-      const cards = document.querySelectorAll(
-        '.utr-card, [class*="score-card"], [class*="eventItem"]',
-      );
-      return cards.length;
-    });
-
-    if (singlesMatchCount < 5 && ULTRA_FAST_MODE) {
+      if (singlesMatchCount < 5 && ULTRA_FAST_MODE) {
+        console.log(
+          `   Only ${singlesMatchCount} singles matches visible, skipping in ultra-fast mode`,
+        );
+        results.singlesMatches = [];
+      } else {
+        results.singlesMatches = await scrapeMatches(
+          page,
+          results.player.name,
+          "singles",
+        );
+        console.log(`   Found ${results.singlesMatches.length} singles matches`);
+      }
       console.log(
-        `   Only ${singlesMatchCount} singles matches visible, skipping in ultra-fast mode`,
+        `⏱️  Singles matches scraped in ${((Date.now() - singlesMatchesStart) / 1000).toFixed(2)}s`,
       );
-      results.singlesMatches = [];
-    } else {
-      results.singlesMatches = await scrapeMatches(
-        page,
-        results.player.name,
-        "singles",
-      );
-      console.log(`   Found ${results.singlesMatches.length} singles matches`);
-    }
-    console.log(
-      `⏱️  Singles matches scraped in ${((Date.now() - singlesMatchesStart) / 1000).toFixed(2)}s`,
-    );
 
-    // ===== DOUBLES MATCHES =====
-    const doublesMatchesStart = Date.now();
+      // ===== DOUBLES MATCHES =====
+      const doublesMatchesStart = Date.now();
 
-    // In ultra-fast mode, skip doubles entirely if singles was also small
-    if (ULTRA_FAST_MODE && results.singlesMatches.length < 5) {
-      console.log(
-        "\n⚡ Ultra-fast mode: skipping doubles (insufficient singles matches)",
-      );
-      results.doublesMatches = [];
-    } else {
-      console.log("\n🎾 Getting doubles matches...");
+      // In ultra-fast mode, skip doubles entirely if singles was also small
+      if (ULTRA_FAST_MODE && results.singlesMatches.length < 5) {
+        console.log(
+          "\n⚡ Ultra-fast mode: skipping doubles (insufficient singles matches)",
+        );
+        results.doublesMatches = [];
+      } else {
+        console.log("\n🎾 Getting doubles matches...");
 
-      try {
-        // Navigate to the results tab first
-        await page.goto(`${BASE_URL}/profiles/${profileId}?t=2`, {
-          waitUntil: "domcontentloaded",
-          timeout: 60000,
-        });
-        await delay(randomDelay(800, 300));
-
-        // Scroll to top first to ensure dropdowns are visible
-        await page.evaluate(() => window.scrollTo(0, 0));
-        await delay(1000);
-
-        // Take screenshot before click
-        await page.screenshot({
-          path: path.join(CACHE_DIR, "before-doubles-click.png"),
-        });
-
-        // Click the SINGLES dropdown to open it, then select Doubles
-        let doublesSelected = false;
         try {
-          // Log what we can see on the page
-          const pageInfo = await page.evaluate(() => {
-            const buttons = [...document.querySelectorAll("button")]
-              .map((b) => b.innerText.trim())
-              .slice(0, 10);
-            const divs = [...document.querySelectorAll("div")]
-              .filter((d) => d.innerText.includes("SINGLES"))
-              .map((d) => d.className)
-              .slice(0, 5);
-            return { buttons, singlesContainers: divs };
+          // Navigate to the results tab first
+          await page.goto(`${BASE_URL}/profiles/${profileId}?t=2`, {
+            waitUntil: "domcontentloaded",
+            timeout: 60000,
           });
-          console.log("   Page buttons:", pageInfo.buttons.join(", "));
+          await delay(randomDelay(800, 300));
 
-          // Try clicking using XPath
+          // Scroll to top first to ensure dropdowns are visible
+          await page.evaluate(() => window.scrollTo(0, 0));
+          await delay(1000);
+
+          // Take screenshot before click
+          await page.screenshot({
+            path: path.join(CACHE_DIR, "before-doubles-click.png"),
+          });
+
+          // Click the SINGLES dropdown to open it, then select Doubles
+          let doublesSelected = false;
           try {
-            const clicked = await page.evaluate(() => {
-              const xpath =
-                "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'singles')]";
-              const result = document.evaluate(
-                xpath,
-                document,
-                null,
-                XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-                null,
-              );
-              for (let i = 0; i < result.snapshotLength; i++) {
-                const btn = result.snapshotItem(i);
-                const rect = btn.getBoundingClientRect();
-                if (
-                  rect.width > 0 &&
-                  rect.height > 0 &&
-                  window.getComputedStyle(btn).visibility !== "hidden" &&
-                  window.getComputedStyle(btn).display !== "none" &&
-                  window.getComputedStyle(btn).pointerEvents !== "none"
-                ) {
-                  btn.click();
-                  return true;
-                }
-              }
-              return false;
+            // Log what we can see on the page
+            const pageInfo = await page.evaluate(() => {
+              const buttons = [...document.querySelectorAll("button")]
+                .map((b) => b.innerText.trim())
+                .slice(0, 10);
+              const divs = [...document.querySelectorAll("div")]
+                .filter((d) => d.innerText.includes("SINGLES"))
+                .map((d) => d.className)
+                .slice(0, 5);
+              return { buttons, singlesContainers: divs };
             });
-            if (clicked) {
-              console.log("   Clicked SINGLES dropdown");
-              await delay(2000);
-            }
+            console.log("   Page buttons:", pageInfo.buttons.join(", "));
 
-            // Screenshot
-            await page.screenshot({
-              path: path.join(CACHE_DIR, "dropdown-open.png"),
-            });
-
-            // Now click DOUBLES
-            const doublesClicked = await page.evaluate(() => {
-              const xpath =
-                "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'doubles')]";
-              const result = document.evaluate(
-                xpath,
-                document,
-                null,
-                XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-                null,
-              );
-              for (let i = 0; i < result.snapshotLength; i++) {
-                const btn = result.snapshotItem(i);
-                const rect = btn.getBoundingClientRect();
-                if (
-                  rect.width > 0 &&
-                  rect.height > 0 &&
-                  window.getComputedStyle(btn).visibility !== "hidden" &&
-                  window.getComputedStyle(btn).display !== "none" &&
-                  window.getComputedStyle(btn).pointerEvents !== "none"
-                ) {
-                  btn.click();
-                  return true;
+            // Try clicking using XPath
+            try {
+              const clicked = await page.evaluate(() => {
+                const xpath =
+                  "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'singles')]";
+                const result = document.evaluate(
+                  xpath,
+                  document,
+                  null,
+                  XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+                  null,
+                );
+                for (let i = 0; i < result.snapshotLength; i++) {
+                  const btn = result.snapshotItem(i);
+                  const rect = btn.getBoundingClientRect();
+                  if (
+                    rect.width > 0 &&
+                    rect.height > 0 &&
+                    window.getComputedStyle(btn).visibility !== "hidden" &&
+                    window.getComputedStyle(btn).display !== "none" &&
+                    window.getComputedStyle(btn).pointerEvents !== "none"
+                  ) {
+                    btn.click();
+                    return true;
+                  }
                 }
+                return false;
+              });
+              if (clicked) {
+                console.log("   Clicked SINGLES dropdown");
+                await delay(2000);
               }
-              return false;
-            });
-            if (doublesClicked) {
-              console.log("   Clicked DOUBLES");
-              await delay(4000);
-              doublesSelected = true;
+
+              // Screenshot
+              await page.screenshot({
+                path: path.join(CACHE_DIR, "dropdown-open.png"),
+              });
+
+              // Now click DOUBLES
+              const doublesClicked = await page.evaluate(() => {
+                const xpath =
+                  "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'doubles')]";
+                const result = document.evaluate(
+                  xpath,
+                  document,
+                  null,
+                  XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+                  null,
+                );
+                for (let i = 0; i < result.snapshotLength; i++) {
+                  const btn = result.snapshotItem(i);
+                  const rect = btn.getBoundingClientRect();
+                  if (
+                    rect.width > 0 &&
+                    rect.height > 0 &&
+                    window.getComputedStyle(btn).visibility !== "hidden" &&
+                    window.getComputedStyle(btn).display !== "none" &&
+                    window.getComputedStyle(btn).pointerEvents !== "none"
+                  ) {
+                    btn.click();
+                    return true;
+                  }
+                }
+                return false;
+              });
+              if (doublesClicked) {
+                console.log("   Clicked DOUBLES");
+                await delay(4000);
+                doublesSelected = true;
+              }
+            } catch (innerErr) {
+              console.log(
+                `   Dropdown click failed: ${innerErr.message?.substring(0, 60)}`,
+              );
             }
-          } catch (innerErr) {
+          } catch (e) {
             console.log(
-              `   Dropdown click failed: ${innerErr.message?.substring(0, 60)}`,
+              `   Dropdown interaction failed: ${e.message?.substring(0, 80)}`,
             );
+          }
+
+          if (!doublesSelected) {
+            console.log("   Could not switch to Doubles - skipping doubles data");
+            results.doublesMatches = [];
+          } else {
+            // Check if page content changed (no longer shows singles-only events)
+            const pageContent = await page.evaluate(() => {
+              const firstEvent =
+                document.querySelector('[class*="eventName"]')?.innerText || "";
+              // Check if W/L record is shown
+              const wlText = document.body.innerText.match(
+                /W\/L[:\s•]*(\d+)\s*-\s*(\d+)/,
+              );
+              return {
+                firstEventTitle: firstEvent,
+                wlRecord: wlText ? `${wlText[1]}-${wlText[2]}` : null,
+                containsSingles: firstEvent.toLowerCase().includes("singles"),
+              };
+            });
+            console.log(
+              `   Page: firstEvent=${pageContent.firstEventTitle?.substring(0, 40)}, W/L=${pageContent.wlRecord}`,
+            );
+
+            // If the page no longer shows "Singles" in event names, assume we switched successfully
+            if (!pageContent.containsSingles || pageContent.wlRecord) {
+              // Scroll to load all matches
+              await scrollToBottom(page);
+              await delay(2000);
+
+              // Take a screenshot for debugging
+              await page.screenshot({
+                path: path.join(CACHE_DIR, "doubles-page.png"),
+              });
+
+              results.doublesMatches = await scrapeMatches(
+                page,
+                results.player.name,
+                "doubles",
+              );
+              console.log(
+                `   Found ${results.doublesMatches.length} doubles matches`,
+              );
+            } else {
+              console.log("   Still showing singles - skipping doubles");
+              results.doublesMatches = [];
+            }
           }
         } catch (e) {
-          console.log(
-            `   Dropdown interaction failed: ${e.message?.substring(0, 80)}`,
-          );
-        }
-
-        if (!doublesSelected) {
-          console.log("   Could not switch to Doubles - skipping doubles data");
+          console.log(`   Could not get doubles matches: ${e.message}`);
           results.doublesMatches = [];
-        } else {
-          // Check if page content changed (no longer shows singles-only events)
-          const pageContent = await page.evaluate(() => {
-            const firstEvent =
-              document.querySelector('[class*="eventName"]')?.innerText || "";
-            // Check if W/L record is shown
-            const wlText = document.body.innerText.match(
-              /W\/L[:\s•]*(\d+)\s*-\s*(\d+)/,
-            );
-            return {
-              firstEventTitle: firstEvent,
-              wlRecord: wlText ? `${wlText[1]}-${wlText[2]}` : null,
-              containsSingles: firstEvent.toLowerCase().includes("singles"),
-            };
-          });
-          console.log(
-            `   Page: firstEvent=${pageContent.firstEventTitle?.substring(0, 40)}, W/L=${pageContent.wlRecord}`,
-          );
-
-          // If the page no longer shows "Singles" in event names, assume we switched successfully
-          if (!pageContent.containsSingles || pageContent.wlRecord) {
-            // Scroll to load all matches
-            await scrollToBottom(page);
-            await delay(2000);
-
-            // Take a screenshot for debugging
-            await page.screenshot({
-              path: path.join(CACHE_DIR, "doubles-page.png"),
-            });
-
-            results.doublesMatches = await scrapeMatches(
-              page,
-              results.player.name,
-              "doubles",
-            );
-            console.log(
-              `   Found ${results.doublesMatches.length} doubles matches`,
-            );
-          } else {
-            console.log("   Still showing singles - skipping doubles");
-            results.doublesMatches = [];
-          }
         }
-      } catch (e) {
-        console.log(`   Could not get doubles matches: ${e.message}`);
-        results.doublesMatches = [];
-      }
-    } // End if (ULTRA_FAST_MODE && results.singlesMatches.length < 5) else
+      } // End if (ULTRA_FAST_MODE && results.singlesMatches.length < 5) else
+    } // End DOM match scraping fallback
 
     // ===== GET OPPONENT RATING HISTORIES =====
     if (FAST_MODE || ULTRA_FAST_MODE) {
@@ -1757,9 +1797,22 @@ async function scrapeUTR(profileId) {
     console.error("Error during scraping:", error.message);
   }
 
+  // DOM-scraped cards only show "Apr 25", so infer years (lists are
+  // newest-first; the year decrements when the month increases). API matches
+  // already carry full ISO dates and are left untouched.
+  if (results.dataSource !== "api") {
+    console.log("\n📅 Inferring match years...");
+    inferYears(results.singlesMatches, results.scrapedAt);
+    inferYears(results.doublesMatches, results.scrapedAt);
+  }
+
   // Calculate UTR deltas for each match
   console.log("\n📈 Calculating UTR deltas...");
-  calculateUtrDeltas(results);
+  attachRatingDeltas(
+    results.singlesMatches,
+    results.singlesHistory,
+    results.opponentHistories,
+  );
 
   // Save to cache
   saveToCache("profile", profileId, results);
@@ -1866,304 +1919,102 @@ async function scrollToBottom(page) {
   }
 }
 
+// Fetch structured data from UTR's JSON API using the page's authenticated
+// session. Must be called with the page on the app.utrsports.net origin so
+// cookies apply. The results endpoint returns the player's full career.
+async function fetchApiData(page, profileId) {
+  return await page.evaluate(async (id) => {
+    const get = async (url) => {
+      const r = await fetch(url, {
+        credentials: "include",
+        headers: { accept: "application/json" },
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
+      return r.json();
+    };
+    // UTR's web app moved to v4 (Nov 2026; v1 now 404s). v4 returns one
+    // year per call (default: the last 12 months), keyed by type=s|d and
+    // year=YYYY|last, so walk back year by year and merge the events —
+    // parseApiResults dedupes by result id.
+    let results;
+    try {
+      const v4 = (q) =>
+        get(`https://api.utrsports.net/v4/player/${id}/results?${q}`).catch(
+          () => null,
+        );
+      const events = [];
+      const counts = [];
+      const add = (body, label) => {
+        const n = (body?.events || []).length;
+        if (n) events.push(...body.events);
+        counts.push(`${label}:${n}`);
+        return n;
+      };
+      for (const type of ["s", "d"]) {
+        add(await v4(`type=${type}&year=last`), `${type}/last`);
+        let emptyStreak = 0;
+        for (let y = new Date().getFullYear(); y >= 2005 && emptyStreak < 3; y--) {
+          const n = add(await v4(`type=${type}&year=${y}`), `${type}/${y}`);
+          emptyStreak = n ? 0 : emptyStreak + 1;
+        }
+      }
+      if (events.length === 0) throw new Error("v4 returned no events");
+      results = { events, _v4Counts: counts.join(" ") };
+    } catch (e) {
+      results = await get(`https://api.utrsports.net/v1/player/${id}/results`);
+    }
+    let profile = null;
+    try {
+      profile = await get(`https://api.utrsports.net/v1/player/${id}/profile`);
+    } catch (e) {
+      // Profile endpoint is optional; results are what matter.
+    }
+    return { results, profile };
+  }, profileId);
+}
+
 async function scrapeMatches(page, playerName, type) {
-  return await page.evaluate(
-    ({ playerName, type }) => {
-      const matches = [];
-      // Use multiple selectors based on what we found in debug
-      const cards = document.querySelectorAll(
-        '.utr-card.score-card, .score-card, [class*="scorecard__link"]',
-      );
+  // Extract raw card data in the browser; all parsing happens in Node via
+  // lib/match-parser.js so it can be shared, tested, and re-run on cached data.
+  const cards = await page.evaluate(() => {
+    const out = [];
+    const cardEls = document.querySelectorAll(
+      '.utr-card.score-card, .score-card, [class*="scorecard__link"]',
+    );
+    cardEls.forEach((card) => {
+      const rawText = card.innerText.replace(/\s+/g, " ").trim();
 
-      cards.forEach((card) => {
-        const match = { type };
-
-        // Get the raw text
-        const rawText = card.innerText.replace(/\s+/g, " ").trim();
-        match.rawText = rawText;
-
-        // Parse date
-        const dateMatch = rawText.match(/\|\s*(\w+\s+\d+)/);
-        match.date = dateMatch ? dateMatch[1] : "";
-
-        // Check for walkover
-        if (rawText.toLowerCase().includes("walkover")) {
-          match.isWalkover = true;
-          // In a walkover, the player listed first (before "walkover") advances
-          // Check if our name comes before "walkover"
-          const walkoverIdx = rawText.toLowerCase().indexOf("walkover");
-          const textBefore = rawText.substring(0, walkoverIdx);
-          match.won = textBefore.includes(playerName.split(" ")[0]);
-        }
-
-        // Find opponent profile ID from link FIRST (reliable method)
-        const links = card.querySelectorAll('a[href*="/profiles/"]');
-        links.forEach((link) => {
-          const href = link.getAttribute("href");
-          const idMatch = href.match(/profiles\/(\d+)/);
-          if (idMatch) {
-            const linkText = link.innerText.trim();
-            // If link text doesn't contain our first name, it's the opponent
-            if (!linkText.includes(playerName.split(" ")[0])) {
-              match.opponentId = idMatch[1];
-              match.opponent = linkText;
-            }
-          }
-        });
-
-        // Parse scores from raw text - most reliable method
-        // Format: "Name1 UTR1 scores1 Name2 UTR2 scores2" e.g., "Harper Chalat 5.74 64 John Smith 4.50 26"
-        // Scores are concatenated digits: "64" means games 6 and 4, "26" means games 2 and 6
-        // Sets would be: 6-2, 4-6
-        let myScores = [],
-          oppScores = [];
-        let tiebreakScoresFromSup = []; // Tiebreak scores from <sup> elements
-
-        // First, find any <sup> elements which contain tiebreak scores
-        const supElements = card.querySelectorAll("sup");
-        supElements.forEach((sup) => {
-          const text = sup.innerText.trim();
-          if (/^\d+$/.test(text)) {
-            tiebreakScoresFromSup.push(parseInt(text));
-          }
-        });
-
-        // Fallback: extract from raw text using pattern matching
-        // Scores like "66 40" mean sets 6-4, 6-0 (each digit is a set score)
-        // Super tiebreaks have "10" which is 2 digits for 10 points
-        if (myScores.length === 0) {
-          const pattern =
-            /([A-Z][a-z]+(?:\s+[A-Z][a-z'-]+)+)\s*(\d+\.\d{2})\s*([\d\s]+)/g;
-          let pm;
-          const playerData = [];
-          while ((pm = pattern.exec(rawText)) !== null) {
-            // Parse scores - handle "10" as a single score (super tiebreak)
-            const rawScores = pm[3].trim().replace(/\s+/g, "");
-            const scores = [];
-            let i = 0;
-            while (i < rawScores.length) {
-              // Check if next two digits form "10" or higher (super tiebreak score)
-              if (i + 1 < rawScores.length) {
-                const twoDigit = parseInt(rawScores.substring(i, i + 2));
-                if (twoDigit >= 10) {
-                  scores.push(twoDigit);
-                  i += 2;
-                  continue;
-                }
-              }
-              // Single digit score
-              scores.push(parseInt(rawScores[i]));
-              i++;
-            }
-            playerData.push({
-              name: pm[1].trim(),
-              utr: parseFloat(pm[2]),
-              scores: scores.filter((n) => !isNaN(n)),
-            });
-          }
-
-          if (playerData.length >= 2) {
-            const isPlayer1 = playerData[0].name.includes(
-              playerName.split(" ")[0],
-            );
-            if (isPlayer1) {
-              myScores = playerData[0].scores;
-              oppScores = playerData[1].scores;
-              match.myUtr = playerData[0].utr;
-              match.opponentUtr = playerData[1].utr;
-              if (!match.opponent) match.opponent = playerData[1].name;
-            } else {
-              myScores = playerData[1].scores;
-              oppScores = playerData[0].scores;
-              match.myUtr = playerData[1].utr;
-              match.opponentUtr = playerData[0].utr;
-              if (!match.opponent) match.opponent = playerData[0].name;
-            }
-          }
-        }
-
-        // Parse sets with tiebreak handling
-        // Tiebreaks: 7-6 means a tiebreak was won. Tiebreak score may be in <sup> (e.g., 7-5, 7-4)
-        // Note: tiebreak scores are 7+ for winner (can't be 7-6 since must win by 2)
-        // Super tiebreaks: 1-0 followed by score like 10-8
-        match.sets = [];
-        match.tiebreakScores = [];
-
-        let supScoreIdx = 0; // Track which <sup> score we're on
-
-        if (
-          myScores.length > 0 &&
-          oppScores.length > 0 &&
-          myScores.length === oppScores.length
-        ) {
-          let i = 0;
-          while (i < myScores.length) {
-            const my = myScores[i];
-            const opp = oppScores[i];
-
-            // Check if this is a tiebreak set (7-6 or 6-7)
-            if ((my === 7 && opp === 6) || (my === 6 && opp === 7)) {
-              match.sets.push(`${my}-${opp}`);
-
-              // Check if next scores look like tiebreak scores (winner > 6, win by 2+)
-              // Or use <sup> tiebreak scores if available
-              if (tiebreakScoresFromSup.length > supScoreIdx) {
-                // Use the <sup> tiebreak score - it's the loser's points
-                const loserPoints = tiebreakScoresFromSup[supScoreIdx];
-                const winnerPoints = Math.max(7, loserPoints + 2); // Winner has at least 7, and at least 2 more
-                if (my === 7) {
-                  match.tiebreakScores.push(`${winnerPoints}-${loserPoints}`);
-                } else {
-                  match.tiebreakScores.push(`${loserPoints}-${winnerPoints}`);
-                }
-                supScoreIdx++;
-              } else if (i + 1 < myScores.length) {
-                // Check if next scores are valid tiebreak scores
-                const nextMy = myScores[i + 1];
-                const nextOpp = oppScores[i + 1];
-                // Valid tiebreak: one player has 7+, wins by 2+
-                const isValidTiebreak =
-                  (nextMy >= 7 || nextOpp >= 7) &&
-                  Math.abs(nextMy - nextOpp) >= 2 &&
-                  !(nextMy === 7 && nextOpp === 6) && // Not another set score
-                  !(nextMy === 6 && nextOpp === 7);
-                if (isValidTiebreak) {
-                  match.tiebreakScores.push(`${nextMy}-${nextOpp}`);
-                  i += 2;
-                  continue;
-                }
-              }
-              // No tiebreak score found - that's ok, 7-6 alone is valid
-              i++;
-            }
-            // Check if this is a super tiebreak (1-0 or 0-1)
-            else if ((my === 1 && opp === 0) || (my === 0 && opp === 1)) {
-              // Next scores are the super tiebreak score
-              if (i + 1 < myScores.length) {
-                const stbMy = myScores[i + 1];
-                const stbOpp = oppScores[i + 1];
-                match.sets.push(`${stbMy}-${stbOpp}`); // Store actual super TB score
-                match.superTiebreak = `${stbMy}-${stbOpp}`;
-                i += 2;
-              } else {
-                match.sets.push(`${my}-${opp}`);
-                i++;
-              }
-            }
-            // Regular set
-            else {
-              match.sets.push(`${my}-${opp}`);
-              i++;
-            }
-          }
-        }
-
-        // Determine win/loss from set count (most reliable method)
-        if (!match.isWalkover && match.sets.length > 0) {
-          let mySets = 0,
-            oppSets = 0;
-          match.sets.forEach((set) => {
-            const parts = set.split("-");
-            if (parts.length !== 2) return;
-            const a = parseInt(parts[0]);
-            const b = parseInt(parts[1]);
-            if (isNaN(a) || isNaN(b)) return;
-
-            // Regular sets (0-7 range) or super tiebreaks (10+)
-            if (a > b) mySets++;
-            else if (b > a) oppSets++;
-          });
-          match.won = mySets > oppSets;
-        }
-
-        // Only add valid matches (must have date and opponent)
-        if (match.date && match.opponent && match.rawText.length > 30) {
-          matches.push(match);
+      const links = [];
+      card.querySelectorAll('a[href*="/profiles/"]').forEach((link) => {
+        const idMatch = (link.getAttribute("href") || "").match(
+          /profiles\/(\d+)/,
+        );
+        if (idMatch) {
+          links.push({ id: idMatch[1], name: link.innerText.trim() });
         }
       });
 
-      return matches;
-    },
-    { playerName, type },
-  );
-}
+      // UTR marks the winning side's name element with "winner" in its class
+      // list; capture its text for retirement/walkover winner fallback.
+      let winnerNameText = null;
+      const winnerEl = card.querySelector(
+        '[class*="player-name"][class*="winner"], .player-name.winner',
+      );
+      if (winnerEl) winnerNameText = winnerEl.innerText.trim();
 
-function calculateUtrDeltas(results) {
-  const myHistory = results.singlesHistory;
-
-  // For each singles match, find UTR before and after
-  results.singlesMatches.forEach((match) => {
-    if (!match.date) return;
-
-    // Parse match date to find the relevant week
-    const year = new Date().getFullYear();
-    const matchDate = new Date(`${match.date}, ${year}`);
-
-    // Find my UTR before and after this match
-    const myBefore = findRatingBefore(myHistory, matchDate);
-    const myAfter = findRatingAfter(myHistory, matchDate);
-
-    match.myUtrBefore = myBefore?.rating;
-    match.myUtrAfter = myAfter?.rating;
-    match.myUtrDelta =
-      myAfter && myBefore
-        ? (myAfter.rating - myBefore.rating).toFixed(2)
-        : null;
-
-    // Find opponent UTR before and after
-    if (match.opponentId && results.opponentHistories[match.opponentId]) {
-      const oppHistory = results.opponentHistories[match.opponentId].history;
-      const oppBefore = findRatingBefore(oppHistory, matchDate);
-      const oppAfter = findRatingAfter(oppHistory, matchDate);
-
-      match.opponentUtrBefore = oppBefore?.rating;
-      match.opponentUtrAfter = oppAfter?.rating;
-      match.opponentUtrDelta =
-        oppAfter && oppBefore
-          ? (oppAfter.rating - oppBefore.rating).toFixed(2)
-          : null;
-    }
+      out.push({ rawText, links, winnerNameText });
+    });
+    return out;
   });
 
-  // Doubles UTR deltas skipped - focusing on singles
-  // results.doublesMatches.forEach(match => {
-  //     if (!match.date) return;
-  //     const year = new Date().getFullYear();
-  //     const matchDate = new Date(`${match.date}, ${year}`);
-  //
-  //     const myBefore = findRatingBefore(myHistory, matchDate);
-  //     const myAfter = findRatingAfter(myHistory, matchDate);
-  //
-  //     match.myUtrBefore = myBefore?.rating;
-  //     match.myUtrAfter = myAfter?.rating;
-  //     match.myUtrDelta = myAfter && myBefore ? (myAfter.rating - myBefore.rating).toFixed(2) : null;
-  // });
+  return cards
+    .map((card) => parseMatch(card, { playerName, type }))
+    .filter(
+      (m) =>
+        m.dateText && (m.opponent || m.isWalkover) && m.rawText.length > 30,
+    );
 }
 
-function findRatingBefore(history, date) {
-  // Find the rating entry just before or on this date
-  let closest = null;
-  for (const entry of history) {
-    const entryDate = new Date(entry.date);
-    if (entryDate <= date) {
-      closest = entry;
-    } else {
-      break;
-    }
-  }
-  return closest;
-}
-
-function findRatingAfter(history, date) {
-  // Find the rating entry just after this date
-  for (const entry of history) {
-    const entryDate = new Date(entry.date);
-    if (entryDate > date) {
-      return entry;
-    }
-  }
-  return null;
-}
 
 function printSummary(results) {
   console.log("\n📊 Summary:");
