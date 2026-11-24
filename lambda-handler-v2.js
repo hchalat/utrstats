@@ -48,7 +48,6 @@ try {
 const TMP_DIR = "/tmp";
 const TASK_DIR = "/var/task";
 const DYNAMODB_TABLE = process.env.DYNAMODB_TABLE || "utr-year-in-review";
-const RATE_LIMIT_TABLE = process.env.RATE_LIMIT_TABLE || "utr-rate-limits";
 
 // Canonical per-profile bundle slot. The table's composite key is
 // (profileId, year); the bundle covers all years, so it lives at year 0.
@@ -74,6 +73,17 @@ function packBundle(data) {
     );
   }
   return gz;
+}
+
+// A refresh must keep at least this share of the previous bundle's matches
+// to replace it.
+const MIN_BUNDLE_RETAINED = 0.9;
+
+function countMatches(bundle) {
+  return (
+    (bundle?.singles?.matches?.length || 0) +
+    (bundle?.doubles?.matches?.length || 0)
+  );
 }
 
 // Reads either storage format: gzipped `dataGz`, or legacy plain `data`.
@@ -143,8 +153,6 @@ async function startBackgroundRefresh(profileId, year) {
   }
 }
 
-// Rate limiting removed - DynamoDB pending status prevents duplicate expensive scrapes
-
 // Helper to ensure all responses have CORS headers
 // Define this BEFORE mainHandler so it's always in scope
 function createCORSResponse(statusCode, body, headers = {}) {
@@ -160,100 +168,6 @@ function createCORSResponse(statusCode, body, headers = {}) {
     },
     body: typeof body === "string" ? body : JSON.stringify(body),
   };
-}
-
-// Rate limiting function
-async function checkRateLimit(identifier, type = "ip") {
-  if (!dynamoDocClient) {
-    console.warn("DynamoDB client not available, allowing request (fail open)");
-    return true; // Allow if DynamoDB not available
-  }
-
-  const now = Date.now();
-  const hourAgo = now - 60 * 60 * 1000;
-  const dayAgo = now - 24 * 60 * 60 * 1000;
-
-  const window = type === "ip" ? hourAgo : dayAgo;
-  const limit = type === "ip" ? MAX_REQUESTS_PER_IP : MAX_REQUESTS_PER_PROFILE;
-  const windowName = type === "ip" ? "hour" : "day";
-
-  try {
-    // Query recent requests
-    const response = await dynamoDocClient.send(
-      new QueryCommand({
-        TableName: RATE_LIMIT_TABLE,
-        KeyConditionExpression: "#id = :id AND #time > :window",
-        ExpressionAttributeNames: {
-          "#id": "identifier",
-          "#time": "timestamp",
-        },
-        ExpressionAttributeValues: {
-          ":id": `${type}:${identifier}`,
-          ":window": window,
-        },
-      }),
-    );
-
-    const requestCount = response.Items?.length || 0;
-
-    if (requestCount >= limit) {
-      console.log(
-        `Rate limit exceeded for ${type}:${identifier} - ${requestCount}/${limit} requests in last ${windowName}`,
-      );
-      return false; // Rate limit exceeded
-    }
-
-    // Record this request
-    await dynamoDocClient.send(
-      new PutCommand({
-        TableName: RATE_LIMIT_TABLE,
-        Item: {
-          identifier: `${type}:${identifier}`,
-          timestamp: now,
-          ttl: Math.floor((now + 24 * 60 * 60 * 1000) / 1000), // 24 hour TTL in seconds
-        },
-      }),
-    );
-
-    console.log(
-      `Rate limit check passed for ${type}:${identifier} - ${requestCount + 1}/${limit} requests in last ${windowName}`,
-    );
-    return true; // Within rate limit
-  } catch (error) {
-    console.error("Rate limit check error:", error);
-    // Fail open - allow request if rate limiting fails
-    return true;
-  }
-}
-
-// Function to extract IP address from event
-function extractIP(event) {
-  // Try various headers that might contain the IP
-  const headers = event.headers || event.multiValueHeaders || {};
-  const xForwardedFor =
-    headers["X-Forwarded-For"] ||
-    headers["x-forwarded-for"] ||
-    (headers["X-Forwarded-For"] && headers["X-Forwarded-For"][0]);
-  if (xForwardedFor) {
-    // X-Forwarded-For can contain multiple IPs, take the first one
-    return xForwardedFor.split(",")[0].trim();
-  }
-
-  const xRealIP = headers["X-Real-IP"] || headers["x-real-ip"];
-  if (xRealIP) {
-    return xRealIP;
-  }
-
-  // Fallback to request context
-  const sourceIP =
-    event.requestContext?.identity?.sourceIp ||
-    event.requestContext?.http?.sourceIp;
-  if (sourceIP) {
-    return sourceIP;
-  }
-
-  // Last resort: use a default identifier
-  return "unknown";
 }
 
 // Session slot for the reusable UTR JWT (refreshed on every scrape). Keyed
@@ -582,36 +496,10 @@ const mainHandler = async (event) => {
     });
   }
 
-  // Ensure createCORSResponse is available (it should be, but just in case)
-  const corsResponse =
-    createCORSResponse ||
-    ((statusCode, body) => ({
-      statusCode,
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
-      },
-      body: typeof body === "string" ? body : JSON.stringify(body),
-    }));
+  const corsResponse = createCORSResponse;
   // Wrap everything in try-catch to ensure we always return a response
   try {
-    console.log("Event received:", JSON.stringify(event, null, 2));
-    console.log("Event keys:", Object.keys(event));
-    console.log(
-      "HTTP Method:",
-      event.httpMethod ||
-        event.requestContext?.http?.method ||
-        event.requestContext?.httpMethod,
-    );
-    console.log("Body type:", typeof event.body);
-    console.log(
-      "Body value (first 200 chars):",
-      typeof event.body === "string"
-        ? event.body.substring(0, 200)
-        : event.body,
-    );
+    console.log("Request:", httpMethod, event.path || event.rawPath || "");
 
     // Parse request body
     let body;
@@ -662,8 +550,6 @@ const mainHandler = async (event) => {
       });
     }
 
-    // Rate limiting removed - DynamoDB pending status prevents duplicate expensive scrapes
-    // Multiple requests for the same profileId will return cached data or "processing" message
 
     // Get credentials from environment variables
     const utrEmail = process.env.UTR_EMAIL;
@@ -922,69 +808,6 @@ const mainHandler = async (event) => {
       });
     }
 
-    // OLD ASYNC CODE (keeping for reference, can be deleted):
-    /*
-    const lambdaFunctionName = process.env.AWS_LAMBDA_FUNCTION_NAME;
-    if (lambdaClient && lambdaFunctionName) {
-      console.log(
-        `Attempting to invoke Lambda function ${lambdaFunctionName} asynchronously...`,
-      );
-      const invokePayload = {
-        action: "scrape",
-        profileId: profileId,
-        year: 2025, // Always use 2025
-        utrEmail: utrEmail,
-        utrPassword: utrPassword,
-      };
-      console.log(
-        "Invoke payload (without credentials):",
-        JSON.stringify({
-          ...invokePayload,
-          utrEmail: "[REDACTED]",
-          utrPassword: "[REDACTED]",
-        }),
-      );
-
-      // Await the invoke to ensure it's actually triggered and log any errors
-      // We don't await the scrape itself, just the invoke command
-      try {
-        const invokeResponse = await lambdaClient.send(
-          new InvokeCommand({
-            FunctionName: lambdaFunctionName,
-            InvocationType: "Event", // Async invocation - doesn't wait for response
-            Payload: JSON.stringify(invokePayload),
-          }),
-        );
-        console.log("Async Lambda invocation triggered successfully");
-        console.log("Invoke response status:", invokeResponse.StatusCode);
-        console.log(
-          "Invoke response metadata:",
-          JSON.stringify(invokeResponse.$metadata || {}),
-        );
-      } catch (invokeError) {
-        console.error("Failed to invoke Lambda asynchronously:", invokeError);
-        console.error("Invoke error name:", invokeError.name);
-        console.error("Invoke error message:", invokeError.message);
-        console.error("Invoke error code:", invokeError.code);
-        console.error("Invoke error stack:", invokeError.stack);
-        // Log error but don't block - the user will get the processing message anyway
-      }
-    } else {
-      console.log("Lambda client or function name not available");
-      console.log("  - lambdaClient:", !!lambdaClient);
-      console.log("  - lambdaFunctionName:", lambdaFunctionName);
-      console.log(
-        "Falling back to direct scrape in background (will likely timeout)...",
-      );
-      // Fire and forget - don't await
-      performScrapeAndUpload(profileId, utrEmail, utrPassword, year).catch(
-        (err) => {
-          console.error("Direct scrape failed:", err);
-        },
-      );
-    }
-    */
-    // END OLD ASYNC CODE
   } catch (error) {
     console.error("Error in mainHandler:", error);
     return corsResponse(200, {
@@ -1024,6 +847,7 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
     // re-fetches recent results and merges them in).
     const sessionJwt = await getUtrJwt(SCRAPE_JWT_MIN_REMAINING_MS);
     let previousBundlePath = "";
+    let previousMatchCount = 0;
     if (dynamoDocClient) {
       try {
         const prev = await dynamoDocClient.send(
@@ -1034,6 +858,7 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
         );
         const previousBundle = unpackBundle(prev.Item);
         if (previousBundle) {
+          previousMatchCount = countMatches(previousBundle);
           previousBundlePath = path.join(workDir, "previous-bundle.json");
           fs.writeFileSync(previousBundlePath, JSON.stringify(previousBundle));
         }
@@ -1048,21 +873,6 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
     // Reference scraper files
     const scraperPath = path.join(TASK_DIR, "scraper-full.js");
     const generatorPath = path.join(TASK_DIR, "generate-full-review.js");
-    const exportCsvPath = path.join(TASK_DIR, "export-csv.js");
-
-    // Debug: List files in TASK_DIR
-    console.log("TASK_DIR:", TASK_DIR);
-    console.log(
-      "Files in TASK_DIR:",
-      fs.readdirSync(TASK_DIR).slice(0, 20).join(", "),
-    );
-    console.log("Looking for scraper-full.js at:", scraperPath);
-    console.log("Looking for generate-full-review.js at:", generatorPath);
-    console.log("scraper-full.js exists:", fs.existsSync(scraperPath));
-    console.log(
-      "generate-full-review.js exists:",
-      fs.existsSync(generatorPath),
-    );
 
     // Check if files exist
     if (!fs.existsSync(scraperPath) || !fs.existsSync(generatorPath)) {
@@ -1141,30 +951,6 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
           );
         }
 
-        // Check if scraper actually created the output file
-        const expectedOutputFile = path.join(
-          workDir,
-          `utr-full-${profileId}.json`,
-        );
-        console.log("Checking for scraper output file at:", expectedOutputFile);
-        console.log("File exists:", fs.existsSync(expectedOutputFile));
-        if (fs.existsSync(expectedOutputFile)) {
-          const stat = fs.statSync(expectedOutputFile);
-          console.log("✅ File exists! Size:", stat.size, "bytes");
-          // Read first 500 chars to verify it's valid JSON
-          const preview = fs
-            .readFileSync(expectedOutputFile, "utf8")
-            .substring(0, 500);
-          console.log("File preview:", preview);
-        } else {
-          console.log("❌ File does NOT exist! Listing workDir contents:");
-          try {
-            const files = fs.readdirSync(workDir);
-            console.log("Files in workDir:", files.join(", "));
-          } catch (e) {
-            console.log("Error listing workDir:", e.message);
-          }
-        }
       } catch (scraperError) {
         console.error("Scraper error:", scraperError);
         console.error("Scraper stdout:", scraperError.stdout || "");
@@ -1213,9 +999,7 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
       // A bundle with zero matches means the scrape effectively failed
       // (usually authentication). Throw so the caller's failure handling
       // preserves any previous good bundle instead of overwriting it.
-      const totalMatches =
-        (result.singles?.matches?.length || 0) +
-        (result.doubles?.matches?.length || 0);
+      const totalMatches = countMatches(result);
       if (totalMatches === 0) {
         const loginFailed =
           result.loginSuccessful === false || result.loginError;
@@ -1225,6 +1009,16 @@ async function performScrapeAndUpload(profileId, utrEmail, utrPassword, year) {
           : "No matches found. The scraper completed but found 0 matches.";
         console.error(errorMessage);
         throw new Error(errorMessage);
+      }
+      // Matches only accumulate, so a markedly smaller bundle means a partial
+      // scrape (e.g. some year calls failed). Keep the previous one instead.
+      if (
+        previousMatchCount >= 10 &&
+        totalMatches < previousMatchCount * MIN_BUNDLE_RETAINED
+      ) {
+        throw new Error(
+          `Refresh found ${totalMatches} matches but the previous bundle has ${previousMatchCount}; keeping the previous bundle.`,
+        );
       }
 
       // Read the generated JSON data to return to user
@@ -1355,95 +1149,3 @@ exports.handler = async (event) => {
     });
   }
 };
-
-// Helper function to generate CSV (from export-csv.js)
-function generateCSV(data) {
-  const rows = [];
-
-  // Header
-  rows.push([
-    "Year",
-    "Player Name",
-    "UTR",
-    "Wins",
-    "Losses",
-    "Win %",
-    "Games Won",
-    "Games Lost",
-    "Games Win %",
-  ]);
-
-  // Add player row
-  const player = data.player || {};
-  const singles = data.singles || {};
-  const record = singles.record || {};
-  const games = singles.gamesRecord || {};
-
-  rows.push([
-    data.year || "",
-    player.name || "",
-    player.singlesUtr || "",
-    record.wins || 0,
-    record.losses || 0,
-    record.winPct || 0,
-    games.won || 0,
-    games.lost || 0,
-    games.winPct || 0,
-  ]);
-
-  // Add matches
-  if (singles.matches && singles.matches.length > 0) {
-    rows.push([]); // Empty row
-    rows.push(["Matches:"]); // Section header
-    rows.push([
-      "Date",
-      "Opponent",
-      "Result",
-      "Score",
-      "UTR",
-      "Opponent UTR",
-      "UTR Diff",
-    ]);
-
-    singles.matches.forEach((m) => {
-      rows.push([
-        m.date || "",
-        m.opponent || "",
-        m.won ? "Win" : "Loss",
-        m.score || "",
-        m.myUtr || m.myUtrBefore || "",
-        m.opponentUtr || m.opponentUtrBefore || "",
-        m.opponentUtr && m.myUtr ? (m.opponentUtr - m.myUtr).toFixed(2) : "",
-      ]);
-    });
-  }
-
-  // Add opponents
-  if (singles.frequentOpponents && singles.frequentOpponents.length > 0) {
-    rows.push([]);
-    rows.push(["Frequent Opponents:"]);
-    rows.push(["Opponent", "Matches", "Record", "Games Record", "UTR"]);
-
-    singles.frequentOpponents.forEach((opp) => {
-      rows.push([
-        opp.name || "",
-        opp.played || 0,
-        opp.record || "",
-        opp.gamesRecord || "",
-        opp.utr || "",
-      ]);
-    });
-  }
-
-  // Convert to CSV string
-  function escapeCSV(value) {
-    if (value === null || value === undefined) return "";
-    const str = String(value);
-    if (str.includes(",") || str.includes('"') || str.includes("\n")) {
-      return '"' + str.replace(/"/g, '""') + '"';
-    }
-    return str;
-  }
-
-  return rows.map((row) => row.map(escapeCSV).join(",")).join("\n");
-}

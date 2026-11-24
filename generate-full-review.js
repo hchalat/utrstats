@@ -73,10 +73,24 @@ console.log("📅 Inferring match years...");
 inferYears(singlesMatches, fullData.scrapedAt);
 inferYears(doublesMatches, fullData.scrapedAt);
 
+// One point per date, oldest first — older scrapes could list a date twice,
+// and anything off the 1-16.5 UTR scale is a page-text misread.
+function cleanHistory(history) {
+  const byDate = new Map();
+  (history || []).forEach((h) => {
+    if (h && /^\d{4}-\d{2}-\d{2}$/.test(h.date) && h.rating >= 1 && h.rating <= 16.5) {
+      byDate.set(h.date, { date: h.date, rating: h.rating });
+    }
+  });
+  return Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
+}
+const singlesHistory = cleanHistory(fullData.singlesHistory);
+const doublesHistory = cleanHistory(fullData.doublesHistory);
+
 console.log("📈 Attaching rating deltas...");
 attachRatingDeltas(
   singlesMatches,
-  fullData.singlesHistory || [],
+  singlesHistory,
   fullData.opponentHistories || {},
 );
 
@@ -97,11 +111,11 @@ const bundle = {
   player: fullData.player || { name: "Unknown", id: PROFILE_ID },
   singles: {
     matches: singlesMatches.map(slim),
-    history: fullData.singlesHistory || [],
+    history: singlesHistory,
   },
   doubles: {
     matches: doublesMatches.map(slim),
-    history: fullData.doublesHistory || [],
+    history: doublesHistory,
   },
 };
 

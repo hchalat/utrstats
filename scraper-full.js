@@ -48,22 +48,35 @@ const AUTH_STATE_FILE = path.join(CACHE_DIR, "auth-state.json");
 const DELAY_BETWEEN_PAGES = 800; // 800ms between page loads (with jitter)
 const DELAY_BETWEEN_OPPONENTS = 300; // 300ms base delay for opponent lookups (with jitter)
 const MAX_OPPONENTS_TO_FETCH = 15; // Limit opponent lookups
-const MAX_PARALLEL_OPPONENTS = 4; // Fetch up to 4 opponents concurrently
-const ENABLE_RESOURCE_BLOCKING = true; // Block images/fonts/CSS to speed up loading
 // A refresh normally re-fetches only the last 12 months of results and
 // merges them into the previous bundle (PREVIOUS_BUNDLE); the full career is
 // re-walked once the last full walk is older than this, which picks up late
 // edits and deletions to older results.
 const FULL_RESULTS_MAX_AGE_DAYS = 60;
 
+// The previous bundle handed over by the Lambda (PREVIOUS_BUNDLE), if any.
+let previousBundleCache;
+function readPreviousBundle() {
+  if (previousBundleCache !== undefined) return previousBundleCache;
+  previousBundleCache = null;
+  const p = process.env.PREVIOUS_BUNDLE;
+  if (p && fs.existsSync(p)) {
+    try {
+      previousBundleCache = JSON.parse(fs.readFileSync(p, "utf8"));
+    } catch (e) {
+      console.log(`⚠️  Could not read previous bundle: ${e.message}`);
+    }
+  }
+  return previousBundleCache;
+}
+
 // The previous bundle, if it can seed an incremental results fetch: every
 // match must come from the API (merging keys on resultId) and its last full
 // walk must be recent enough that the 12-month fetch overlaps it.
 function loadPreviousBundle() {
-  const p = process.env.PREVIOUS_BUNDLE;
-  if (!p || !fs.existsSync(p)) return null;
+  const bundle = readPreviousBundle();
+  if (!bundle) return null;
   try {
-    const bundle = JSON.parse(fs.readFileSync(p, "utf8"));
     const all = [
       ...(bundle.singles?.matches || []),
       ...(bundle.doubles?.matches || []),
@@ -79,7 +92,6 @@ function loadPreviousBundle() {
     }
     return bundle;
   } catch (e) {
-    console.log(`⚠️  Could not read previous bundle: ${e.message}`);
     return null;
   }
 }
@@ -95,23 +107,15 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Helper function to replace page.$x (removed in Puppeteer v21+)
-// Uses XPath via evaluate instead
-async function findByXPath(page, xpath) {
-  return await page.evaluate((xpathExpr) => {
-    const result = [];
-    const nodesSnapshot = document.evaluate(
-      xpathExpr,
-      document,
-      null,
-      XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-      null,
-    );
-    for (let i = 0; i < nodesSnapshot.snapshotLength; i++) {
-      result.push(nodesSnapshot.snapshotItem(i));
-    }
-    return result;
-  }, xpath);
+// Debug screenshots into CACHE_DIR: on for local runs, opt-in on Lambda
+// (DEBUG_SCREENSHOTS=1), where nobody reads /tmp and each one costs time.
+const SCREENSHOTS =
+  process.env.DEBUG_SCREENSHOTS === "1" || !process.env.LAMBDA_TASK_ROOT;
+async function debugScreenshot(page, file) {
+  if (!SCREENSHOTS) return;
+  try {
+    await page.screenshot({ path: path.join(CACHE_DIR, file) });
+  } catch (e) {}
 }
 
 // Helper to click an element found by XPath
@@ -583,7 +587,7 @@ async function scrapeUTR(profileId) {
     await delay(3000);
 
     // Take initial screenshot
-    await page.screenshot({ path: path.join(CACHE_DIR, "initial-page.png") });
+    await debugScreenshot(page, "initial-page.png");
 
     let loginInfo = await page.evaluate(() => {
       const state = window.INITIAL_STATE;
@@ -759,9 +763,7 @@ async function scrapeUTR(profileId) {
           );
           console.log(`   ✅ Filled email using selector: ${workingEmailSelector}`);
         } else {
-          await page.screenshot({
-            path: path.join(CACHE_DIR, "login-timeout.png"),
-          });
+          await debugScreenshot(page, "login-timeout.png");
           console.log("   ⚠️  Email field not found, screenshot saved");
         }
         await delay(1000);
@@ -914,9 +916,7 @@ async function scrapeUTR(profileId) {
               "   ❌ Could not fill password - login will likely fail",
             );
             // Take screenshot for debugging
-            await page.screenshot({
-              path: path.join(CACHE_DIR, "password-not-found.png"),
-            });
+            await debugScreenshot(page, "password-not-found.png");
             console.log("   Screenshot saved to cache/password-not-found.png");
             // Also log what inputs are on the page
             const inputInfo = await page.evaluate(() => {
@@ -938,9 +938,7 @@ async function scrapeUTR(profileId) {
         await delay(1000);
 
         // Take a screenshot for debugging
-        await page.screenshot({
-          path: path.join(CACHE_DIR, "login-form-filled.png"),
-        });
+        await debugScreenshot(page, "login-form-filled.png");
         console.log("   Screenshot saved to cache/login-form-filled.png");
 
         // Click submit button - try multiple methods
@@ -1147,9 +1145,7 @@ async function scrapeUTR(profileId) {
 
           if (!isLoggedIn) {
             // Take screenshot for debugging
-            await page.screenshot({
-              path: path.join(CACHE_DIR, "login-failed.png"),
-            });
+            await debugScreenshot(page, "login-failed.png");
             console.log("   Screenshot saved to cache/login-failed.png");
           }
         }
@@ -1172,16 +1168,12 @@ async function scrapeUTR(profileId) {
         } else {
           console.log("⚠️  Login verification failed - userId still undefined");
           console.log("   Will try to continue but matches may not be found");
-          await page.screenshot({
-            path: path.join(CACHE_DIR, "login-result.png"),
-          });
+          await debugScreenshot(page, "login-result.png");
           console.log("   Screenshot saved to cache/login-result.png");
         }
       } catch (e) {
         console.log("⚠️  Auto-login error:", e.message);
-        await page.screenshot({
-          path: path.join(CACHE_DIR, "login-error.png"),
-        });
+        await debugScreenshot(page, "login-error.png");
       }
     }
 
@@ -1469,14 +1461,21 @@ async function scrapeUTR(profileId) {
       await delay(2000);
 
       // Take screenshot for debugging
-      await page.screenshot({
-        path: path.join(CACHE_DIR, "stats-page-after-showall.png"),
-      });
+      await debugScreenshot(page, "stats-page-after-showall.png");
 
       results.singlesHistory = await scrapeRatingHistory(page);
       console.log(
         `   Found ${results.singlesHistory.length} singles rating points`,
       );
+      // A page that didn't render shouldn't wipe the UTR chart: keep the
+      // previous history until a later refresh reads it again.
+      const previousHistory = readPreviousBundle()?.singles?.history || [];
+      if (results.singlesHistory.length === 0 && previousHistory.length > 0) {
+        results.singlesHistory = previousHistory;
+        console.log(
+          `   ⚠️  Kept ${previousHistory.length} rating points from the previous bundle`,
+        );
+      }
       console.log(
         `⏱️  Rating history fetched in ${((Date.now() - historyStart) / 1000).toFixed(2)}s`,
       );
@@ -1515,7 +1514,7 @@ async function scrapeUTR(profileId) {
       await scrollToBottom(page);
 
       // Debug: Check what's on the page
-      await page.screenshot({ path: path.join(CACHE_DIR, "matches-page.png") });
+      await debugScreenshot(page, "matches-page.png");
 
       const pageDebug = await page.evaluate(() => {
         // Get all class names that contain common match-related words
@@ -1611,9 +1610,7 @@ async function scrapeUTR(profileId) {
           await delay(1000);
 
           // Take screenshot before click
-          await page.screenshot({
-            path: path.join(CACHE_DIR, "before-doubles-click.png"),
-          });
+          await debugScreenshot(page, "before-doubles-click.png");
 
           // Click the SINGLES dropdown to open it, then select Doubles
           let doublesSelected = false;
@@ -1665,9 +1662,7 @@ async function scrapeUTR(profileId) {
               }
 
               // Screenshot
-              await page.screenshot({
-                path: path.join(CACHE_DIR, "dropdown-open.png"),
-              });
+              await debugScreenshot(page, "dropdown-open.png");
 
               // Now click DOUBLES
               const doublesClicked = await page.evaluate(() => {
@@ -1741,9 +1736,7 @@ async function scrapeUTR(profileId) {
               await delay(2000);
 
               // Take a screenshot for debugging
-              await page.screenshot({
-                path: path.join(CACHE_DIR, "doubles-page.png"),
-              });
+              await debugScreenshot(page, "doubles-page.png");
 
               results.doublesMatches = await scrapeMatches(
                 page,
@@ -1952,7 +1945,9 @@ async function scrapeRatingHistory(page) {
     const pattern1 = /(\d{4}-\d{2}-\d{2})\s*\n?\s*(\d+\.\d{2})/g;
     let match;
     while ((match = pattern1.exec(text)) !== null) {
-      history.push({ date: match[1], rating: parseFloat(match[2]) });
+      if (!history.some((h) => h.date === match[1])) {
+        history.push({ date: match[1], rating: parseFloat(match[2]) });
+      }
     }
 
     // Try pattern 2: Date in various formats (Dec 29, 2025 or 12/29/2025)
@@ -1989,7 +1984,11 @@ async function scrapeRatingHistory(page) {
       }
     });
 
-    return history.sort((a, b) => new Date(a.date) - new Date(b.date));
+    // Pattern 3 takes the first X.XX in a row; drop anything that can't be
+    // a UTR (the scale runs 1-16.5).
+    return history
+      .filter((h) => h.rating >= 1 && h.rating <= 16.5)
+      .sort((a, b) => new Date(a.date) - new Date(b.date));
   });
 }
 
