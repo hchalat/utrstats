@@ -881,7 +881,9 @@
                 <div class="section-title">UTR Journey${state.discipline === "doubles" ? " (Doubles)" : ""}</div>
                 ${chart
                     ? `<div class="chart-card">${chart}</div>`
-                    : `<div class="no-data">No ${esc(state.discipline)} rating history yet — it will populate on the next data refresh.</div>`}
+                    : state.discipline === "doubles"
+                        ? `<div class="no-data">UTR doesn't publish a doubles rating history, so there's no doubles chart.</div>`
+                        : `<div class="no-data">No singles rating history yet — it will populate on the next data refresh.</div>`}
                 ${rAll.peak ? `
                 <div class="stats-grid">
                     <div class="stat-card"><div class="stat-label">🏔️ All-Time Peak</div><div class="stat-value">${rAll.peak.rating.toFixed(2)}</div><div class="stat-detail">${fmtDate(rAll.peak.date)}</div></div>
